@@ -1,7 +1,7 @@
 //! Small Win32 process helpers shared by the active-tool detector and the
 //! Antigravity provider.
 //!
-//! Everything here works across the elevation boundary: a normal-user Quotty
+//! Everything here works across the elevation boundary: a normal-user Tokpaek
 //! can still see the name, command line and listening ports of a tool started
 //! "as administrator", because `PROCESS_QUERY_LIMITED_INFORMATION` and the TCP
 //! table are readable up the integrity ladder. Reading another process's memory

@@ -1,50 +1,28 @@
-// Quotty — a movable, translucent tray strip showing your Claude quota windows.
+// Tokpaek — a movable, translucent tray strip showing your Claude quota windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod active;
-mod app;
-mod config;
-mod icon;
-mod providers;
-mod settings_ui;
-mod shortcuts;
-mod tray;
-mod update;
-mod winproc;
+use tokpaek::{app, config, windowing};
 
 use eframe::egui;
 
 #[cfg(windows)]
 fn single_instance_guard() -> Option<windows::Win32::Foundation::HANDLE> {
     use windows::core::w;
-    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, WPARAM};
     use windows::Win32::System::Threading::CreateMutexW;
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, RegisterWindowMessageW};
 
     unsafe {
-        let handle = CreateMutexW(None, true, w!("Local\\QuottySingleInstanceMutex")).ok()?;
+        let handle = CreateMutexW(None, true, w!("Local\\TokpaekSingleInstanceMutex")).ok()?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
+            let msg = RegisterWindowMessageW(w!("Tokpaek_ActivateInstance"));
+            if msg != 0 {
+                let _ = PostMessageW(HWND(0xffff as *mut _), msg, WPARAM(0), LPARAM(0));
+            }
             return None;
         }
         Some(handle)
     }
-}
-
-#[cfg(windows)]
-fn is_position_visible(x: f32, y: f32) -> bool {
-    use windows::Win32::Foundation::POINT;
-    use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL};
-    unsafe {
-        let pt = POINT {
-            x: x as i32,
-            y: y as i32,
-        };
-        !MonitorFromPoint(pt, MONITOR_DEFAULTTONULL).0.is_null()
-    }
-}
-
-#[cfg(not(windows))]
-fn is_position_visible(_x: f32, _y: f32) -> bool {
-    true
 }
 
 fn main() -> eframe::Result<()> {
@@ -59,18 +37,19 @@ fn main() -> eframe::Result<()> {
 
     let settings = config::Settings::load();
 
+    let size = settings.circle_size as f32;
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([430.0, 100.0])
-        // Low enough for the Nano design with a single limit row; the window is
-        // not resizable by hand anyway.
-        .with_min_inner_size([160.0, 30.0])
+        .with_inner_size([size, size])
+        .with_min_inner_size([100.0, 100.0])
         .with_decorations(false)
         .with_transparent(true)
-        .with_always_on_top()
-        .with_resizable(false)
+        .with_resizable(true)
         .with_taskbar(false);
+    if settings.always_on_top {
+        viewport = viewport.with_always_on_top();
+    }
     if let Some((x, y)) = settings.pos {
-        if is_position_visible(x, y) {
+        if windowing::visible_on_some_monitor(x, y) {
             viewport = viewport.with_position([x, y]);
         }
     }
@@ -78,11 +57,12 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport,
         renderer: eframe::Renderer::Glow,
+        multisampling: 4,
         ..Default::default()
     };
 
     eframe::run_native(
-        "Quotty",
+        "Tokpaek",
         options,
         Box::new(move |cc| Ok(Box::new(app::App::new(cc, settings)))),
     )

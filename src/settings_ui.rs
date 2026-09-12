@@ -2,7 +2,7 @@
 //! strip, opened centred on whichever monitor the user called it from.
 
 use crate::app::App;
-use crate::config::{ActiveMode, HeaderMode, StripSize};
+use crate::i18n::{tr_format, Language};
 use crate::providers::Family;
 use crate::shortcuts;
 
@@ -20,9 +20,17 @@ const DIM: Color32 = Color32::from_rgb(176, 184, 200);
 const HINT: Color32 = Color32::from_rgb(158, 167, 184);
 const WARN: Color32 = Color32::from_rgb(238, 162, 92);
 
-const WIN_W: f32 = 430.0;
-const WIN_TITLE: &str = "Quotty — настройки";
-const AUTHOR_URL: &str = "https://t.me/nova_txt";
+const WIN_W: f32 = 460.0;
+const WIN_H: f32 = 600.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    #[default]
+    Appearance,
+    Behavior,
+    Sources,
+    System,
+}
 
 /// Windows' own UI face, in the weight the strip is drawn in. It is read from
 /// the system font folder rather than bundled — the licence does not allow
@@ -35,7 +43,7 @@ fn install_font(ctx: &egui::Context) {
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) => {
-            crate::providers::dbg_log(&format!("font: {} unreadable: {e}", path.display()));
+            crate::diaglog::dbg_log(&format!("font: {} unreadable: {e}", path.display()));
             return;
         }
     };
@@ -63,12 +71,8 @@ pub fn apply_style(ctx: &egui::Context) {
 
     v.panel_fill = BG;
     v.window_fill = BG;
-    // Slider rail *and* scroll-bar track. It has to stay well below
-    // `widgets.inactive.bg_fill`, which egui uses for the scroll handle: at
-    // (46,51,62) against a (48,53,65) handle the bar was invisible.
     v.extreme_bg_color = Color32::from_rgb(14, 16, 21);
     v.faint_bg_color = CARD;
-    // Every widget's text goes through this, so nothing inherits egui's dim greys.
     v.override_text_color = Some(TEXT);
     v.hyperlink_color = ACCENT;
     v.window_rounding = Rounding::same(12.0);
@@ -84,12 +88,11 @@ pub fn apply_style(ctx: &egui::Context) {
     ] {
         w.rounding = Rounding::same(7.0);
         w.bg_stroke = Stroke::NONE;
-        // Checkmarks and slider handles, not label text.
-        w.fg_stroke = Stroke::new(1.8, ACCENT);
+        w.fg_stroke = Stroke::new(1.8_f32, ACCENT);
     }
     v.widgets.noninteractive.rounding = Rounding::same(7.0);
     v.widgets.noninteractive.bg_stroke = Stroke::NONE;
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT);
     v.widgets.inactive.bg_fill = CARD_HI;
     v.widgets.inactive.weak_bg_fill = CARD_HI;
     v.widgets.hovered.bg_fill = Color32::from_rgb(60, 66, 80);
@@ -97,19 +100,19 @@ pub fn apply_style(ctx: &egui::Context) {
     v.widgets.active.bg_fill = Color32::from_rgb(70, 77, 92);
     v.widgets.active.weak_bg_fill = Color32::from_rgb(70, 77, 92);
     v.selection.bg_fill = ACCENT_BG;
-    v.selection.stroke = Stroke::new(1.0, ACCENT);
+    v.selection.stroke = Stroke::new(1.0_f32, ACCENT);
 
     style.visuals = v;
     style.spacing.item_spacing = Vec2::new(8.0, 8.0);
     style.spacing.button_padding = Vec2::new(10.0, 5.0);
     style.spacing.interact_size.y = 22.0;
-    // A solid, always-drawn bar: on a short screen the panel scrolls, and a
-    // floating bar that only appears on hover would not say so.
     style.spacing.scroll = egui::style::ScrollStyle::solid();
     style.spacing.scroll.bar_width = 9.0;
 
-    // egui's own zoom shortcut (Ctrl+±) is not persisted, so an accidental one
-    // just leaves the strip the wrong size until a restart.
+    style.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(13.5));
+    style.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(13.0));
+    style.text_styles.insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
+
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
     let style: std::sync::Arc<egui::Style> = style.into();
@@ -120,24 +123,29 @@ pub fn apply_style(ctx: &egui::Context) {
 
 impl App {
     pub(crate) fn render_settings(&mut self, ctx: &egui::Context) {
+        let lang = self.settings.language;
         if !self.show_settings {
             return;
         }
         let mut close = false;
         let mut refresh_now = false;
         let mut check_update = false;
-        let mut content_h = self.settings_h;
-        let mut max_h = f32::INFINITY;
 
-        let vid = egui::ViewportId::from_hash_of("quotty-settings");
-        let builder = egui::ViewportBuilder::default()
-            .with_title(WIN_TITLE)
-            .with_inner_size([WIN_W, self.settings_h])
+        let vid = egui::ViewportId::from_hash_of("tokpaek-settings");
+        let mut builder = egui::ViewportBuilder::default()
+            .with_title(lang.text("Токпаёк — Настройки", "Tokpaek — Settings"))
+            .with_inner_size([WIN_W, WIN_H])
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
             .with_taskbar(false)
             .with_resizable(false);
+
+        if let Some((left, top, right, bottom)) = self.settings_area.or_else(crate::windowing::cursor_work_area) {
+            let x = left as f32 + ((right - left) as f32 - WIN_W) / 2.0;
+            let y = top as f32 + ((bottom - top) as f32 - WIN_H) / 2.0;
+            builder = builder.with_position([x.max(left as f32), y.max(top as f32)]);
+        }
 
         ctx.show_viewport_immediate(vid, builder, |ctx, _class| {
             egui::CentralPanel::default()
@@ -148,37 +156,32 @@ impl App {
                         .inner_margin(egui::Margin::symmetric(14.0, 12.0)),
                 )
                 .show(ctx, |ui| {
-                    // The title bar stays outside the scroll area: on a screen
-                    // too short for the whole panel, ✕ must still be reachable.
+                    // No footer: the ✕ in the title bar (and Escape) close the
+                    // window; a "Close" button next to them is one control too
+                    // many.
                     close |= self.title_bar(ui, ctx);
-                    let scrolled = egui::ScrollArea::vertical()
-                        .auto_shrink([false, true])
-                        .scroll_bar_visibility(
-                            egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
-                        )
-                        .show(ui, |ui| {
-                            self.appearance_card(ui);
-                            self.sources_card(ui);
-                            refresh_now |= self.polling_card(ui);
-                            self.system_card(ui);
-                            check_update |= self.version_card(ui);
+                    ui.add_space(4.0);
+                    self.tabs_bar(ui);
+                    ui.add_space(6.0);
 
-                            ui.add_space(8.0);
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.button("Закрыть").clicked() {
-                                        close = true;
-                                    }
-                                },
-                            );
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            match self.settings_tab {
+                                SettingsTab::Appearance => {
+                                    self.appearance_card(ui);
+                                }
+                                SettingsTab::Behavior => {
+                                    self.behavior_card(ui);
+                                }
+                                SettingsTab::Sources => {
+                                    refresh_now |= self.sources_card(ui);
+                                }
+                                SettingsTab::System => {
+                                    check_update |= self.system_card(ui);
+                                }
+                            }
                         });
-                    // Fit the window to its content instead of guessing a
-                    // height — `content_size` is the *unclamped* height, so this
-                    // does not feed back into itself once the window is capped.
-                    let head = scrolled.inner_rect.min.y - ui.max_rect().min.y;
-                    content_h = head + scrolled.content_size.y + 24.0;
-                    max_h = work_area_height(ctx, self.settings_area);
                 });
 
             if ctx.input(|i| i.viewport().close_requested())
@@ -188,30 +191,37 @@ impl App {
             }
         });
 
-        // The window exists only once the viewport has had a frame; strip the
-        // system chrome off it the moment it does.
         if self.settings_hwnd.is_none() {
-            self.settings_hwnd = own_settings_window();
+            self.settings_hwnd = crate::windowing::find_settings_wnd();
             #[cfg(windows)]
             if let Some(h) = self.settings_hwnd {
-                drop_system_chrome(windows::Win32::Foundation::HWND(h as *mut _));
+                crate::windowing::strip_chrome(windows::Win32::Foundation::HWND(h as *mut _));
             }
         }
 
-        // Never grow past the screen: a taller panel would push its own title
-        // bar off the top and the buttons off the bottom, leaving no way to
-        // close it. The content scrolls instead.
-        let want_h = content_h.min(max_h);
-        if (want_h - self.settings_h).abs() > 1.0 {
-            self.settings_h = want_h;
-            // Re-centre once the final size is known.
-            self.settings_center = true;
-        } else if self.settings_center
-            && self
-                .settings_hwnd
-                .is_some_and(|h| center_window(h, self.settings_area))
-        {
-            self.settings_center = false;
+        // The settings window has its own behavior, independent of the
+        // widget's "always on top" choice: while it is open it stays above
+        // every window. winit's always_on_top loses to other topmost windows,
+        // so re-assert it through Win32 every frame while open.
+        if let Some(h) = self.settings_hwnd {
+            crate::windowing::set_topmost(h);
+        }
+
+        if self.settings_center {
+            if let Some(h) = self.settings_hwnd {
+                if crate::windowing::center(h, self.settings_area) {
+                    self.settings_center = false;
+                    #[cfg(windows)]
+                    unsafe {
+                        use windows::Win32::UI::WindowsAndMessaging::{
+                            BringWindowToTop, SetForegroundWindow,
+                        };
+                        let hwnd = windows::Win32::Foundation::HWND(h as *mut _);
+                        let _ = BringWindowToTop(hwnd);
+                        let _ = SetForegroundWindow(hwnd);
+                    }
+                }
+            }
         }
 
         if refresh_now {
@@ -223,8 +233,8 @@ impl App {
         if close {
             self.show_settings = false;
             self.settings_center = false;
-            // The window goes with the viewport; the next open makes a new one.
             self.settings_hwnd = None;
+            self.manual_unhide_until = ctx.input(|i| i.time) + 5.0;
             self.settings.save();
         }
         self.shared
@@ -235,115 +245,271 @@ impl App {
             .store(self.settings.enabled_mask(), Ordering::Relaxed);
     }
 
-    /// Custom chrome: drag anywhere on the bar, ✕ closes. Returns "close".
+    fn tabs_bar(&mut self, ui: &mut egui::Ui) {
+        let lang = self.settings.language;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let mut tab = |ui: &mut egui::Ui, t: SettingsTab, label: &str| {
+                if ui
+                    .selectable_label(
+                        self.settings_tab == t,
+                        RichText::new(label).size(13.0).strong(),
+                    )
+                    .clicked()
+                {
+                    self.settings_tab = t;
+                }
+            };
+            tab(ui, SettingsTab::Appearance, lang.text("Вид", "Appearance"));
+            tab(ui, SettingsTab::Behavior, lang.text("Поведение", "Behavior"));
+            tab(ui, SettingsTab::Sources, lang.text("Источники", "Sources"));
+            tab(ui, SettingsTab::System, lang.text("Система", "System"));
+        });
+    }
+
+    /// Custom chrome: drag anywhere on the bar, ✕ closes.
     fn title_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
+        let lang = self.settings.language;
         let mut close = false;
         let bar =
-            egui::Rect::from_min_size(ui.max_rect().min, Vec2::new(ui.max_rect().width(), 24.0));
+            egui::Rect::from_min_size(ui.max_rect().min, Vec2::new(ui.max_rect().width(), 26.0));
         let drag = ui.interact(bar, ui.id().with("settings-drag"), Sense::click_and_drag());
         if drag.drag_started() {
             ctx.send_viewport_cmd(ViewportCommand::StartDrag);
         }
 
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Quotty").size(14.5).strong().color(TEXT));
-            ui.label(RichText::new("· настройки").size(11.5).color(DIM));
-            // Author credit sits on the same line, just left of the ✕.
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(RichText::new(lang.text("Токпаёк", "Tokpaek")).size(15.0).strong().color(TEXT));
+            ui.label(RichText::new("—").size(15.0).color(HINT));
+            ui.label(
+                RichText::new(lang.text("Настройки", "Settings"))
+                    .size(15.0)
+                    .color(DIM),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 close = close_button(ui);
-                ui.spacing_mut().item_spacing.x = 5.0;
-                ui.hyperlink_to(
-                    RichText::new("t.me/nova_txt").size(11.0).color(ACCENT),
-                    AUTHOR_URL,
-                );
-                ui.label(RichText::new("Brent ©  |").size(11.0).color(DIM));
             });
         });
         close
     }
 
     fn appearance_card(&mut self, ui: &mut egui::Ui) {
-        card(ui, "ВНЕШНИЙ ВИД", |ui| {
+        use crate::config::CirclePalette;
+        let lang = self.settings.language;
+        card(ui, lang.text("ШКАЛА «КРУГ»", "CIRCLE GAUGE"), |ui| {
             let s = &mut self.settings;
-            value_row(ui, "Непрозрачность", &format!("{:.0}%", s.opacity * 100.0));
-            if full_width_slider(ui, &mut s.opacity, 0.2..=1.0) {
-                s.save();
-            }
 
+            caption(ui, lang.text("Цветовая палитра", "Color palette"));
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 5.0;
-                for (label, val) in [
-                    ("100%", 1.0f32),
-                    ("80%", 0.8),
-                    ("66%", 0.66),
-                    ("50%", 0.5),
-                    ("33%", 0.33),
-                    ("20%", 0.2),
-                ] {
-                    let on = (s.opacity - val).abs() < 0.005;
-                    if ui.selectable_label(on, label).clicked() {
-                        s.opacity = val;
-                        s.save();
-                    }
-                }
-            });
-
-            ui.add_space(2.0);
-            if ui.checkbox(&mut s.animate, "Анимация пузырьков").changed() {
-                s.save();
-            }
-
-            ui.add_space(4.0);
-            caption(ui, "Дизайн полосы");
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 5.0;
-                let mut pick = |ui: &mut egui::Ui, size: StripSize, label: &str| {
-                    if ui.selectable_label(s.strip_size == size, label).clicked() {
-                        s.strip_size = size;
+                let mut pick = |ui: &mut egui::Ui, pal: CirclePalette, label: &str| {
+                    if ui.selectable_label(s.circle_palette == pal, label).clicked() {
+                        s.circle_palette = pal;
                         s.save();
                     }
                 };
-                pick(ui, StripSize::Normal, "Обычный");
-                pick(ui, StripSize::Mini, "Мини");
-                pick(ui, StripSize::Nano, "Нано");
+                pick(ui, CirclePalette::Gradient, lang.text("Градиент", "Gradient"));
+                pick(ui, CirclePalette::Traffic, lang.text("Светофор", "Traffic"));
+                pick(ui, CirclePalette::Cyan, lang.text("Бирюзовый", "Cyan"));
+                pick(ui, CirclePalette::Monochrome, lang.text("Монохром", "Monochrome"));
             });
 
             ui.add_space(4.0);
+            caption(ui, lang.text("Формат шкалы", "Scale format"));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 5.0;
+                let mut pick = |ui: &mut egui::Ui, seg: usize, label: &str| {
+                    if ui.selectable_label(s.circle_segments == seg, label).clicked() {
+                        s.circle_segments = seg;
+                        s.save();
+                    }
+                };
+                pick(ui, 10, lang.text("Десятичная", "Decimal"));
+                pick(ui, 12, lang.text("Часовая", "Clock"));
+                pick(ui, 0, lang.text("Сплошная", "Solid"));
+            });
+        });
+
+        card(ui, lang.text("РАЗМЕР И ПРОЗРАЧНОСТЬ", "SIZE & TRANSPARENCY"), |ui| {
+            let s = &mut self.settings;
+            value_row(
+                ui,
+                lang.text("Размер виджета", "Widget size"),
+                &format!("{}px", s.circle_size),
+            );
+            if full_width_slider(ui, &mut s.circle_size, SIZE_MIN..=SIZE_MAX) {
+                s.save();
+            }
+            // Preset marks under the slider, each under its own point.
+            if let Some(v) = slider_marks(
+                ui,
+                SIZE_MIN as f32,
+                SIZE_MAX as f32,
+                &SIZE_PRESETS,
+                false,
+                &|v| v == s.circle_size as f32,
+                &|v| format!("{:.0}px", v),
+            ) {
+                s.circle_size = v as u32;
+                s.save();
+            }
+            ui.label(
+                RichText::new(lang.text(
+                    "Размер виджета меняется перетаскиванием его края, как у обычного окна.",
+                    "Resize the widget by dragging its edge, like any window.",
+                ))
+                .size(12.0)
+                .color(HINT),
+            );
+
+            ui.add_space(8.0);
+            // The slider carries opacity, the user reads transparency.
+            let mut transparency = (1.0 - s.opacity).clamp(0.0, 1.0);
+            value_row(
+                ui,
+                lang.text("Прозрачность", "Transparency"),
+                &format!("{:.0}%", transparency * 100.0),
+            );
+            let changed = full_width_slider(ui, &mut transparency, TRANSP_MIN..=TRANSP_MAX);
+            // Preset marks under the slider: 0% on the left end, 80% on the
+            // right, each under the point it stands for.
+            if let Some(v) = slider_marks(
+                ui,
+                TRANSP_MIN,
+                TRANSP_MAX,
+                &TRANSP_PRESETS,
+                false,
+                &|v| (transparency - v).abs() < 0.005,
+                &|v| format!("{:.0}%", v * 100.0),
+            ) {
+                transparency = v;
+                s.opacity = (1.0 - transparency).clamp(OPACITY_MIN, OPACITY_MAX);
+                s.save();
+            }
+            if changed {
+                s.opacity = (1.0 - transparency).clamp(OPACITY_MIN, OPACITY_MAX);
+                s.save();
+            }
+        });
+    }
+
+    /// Window behavior and the gauge's timers.
+    fn behavior_card(&mut self, ui: &mut egui::Ui) {
+        let lang = self.settings.language;
+        card(ui, lang.text("ТАЙМЕР В ЦЕНТРАЛЬНОЙ ПЛАШКЕ", "MIDDLE PILL TIMER"), |ui| {
+            let s = &mut self.settings;
+            caption(ui, lang.text("Показывать сброс квоты", "Show quota reset of"));
+            // A switch between the two things it can show, so the choice is
+            // visible instead of implied by a checkbox label.
+            let locked = s.circle_show_claude_gpt;
+            ui.add_enabled_ui(!locked, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    let mut pick = |ui: &mut egui::Ui, weekly: bool, label: &str| {
+                        if ui
+                            .selectable_label(s.circle_show_weekly_reset == weekly, label)
+                            .clicked()
+                        {
+                            s.circle_show_weekly_reset = weekly;
+                            s.save();
+                        }
+                    };
+                    pick(ui, false, lang.text("ПЯТЬ ЧАСОВ", "FIVE HOURS"));
+                    pick(ui, true, lang.text("СЕМЬ ДНЕЙ", "SEVEN DAYS"));
+                });
+            });
+            ui.label(
+                RichText::new(if locked {
+                    lang.text(
+                        "Недоступно, пока нижняя дуга заменена на Claude / GPT",
+                        "Unavailable while the lower arc is replaced with Claude / GPT",
+                    )
+                } else {
+                    lang.text(
+                        "Также переключается кликом по виджету.",
+                        "Also toggled by clicking the widget.",
+                    )
+                })
+                .size(12.0)
+                .color(HINT),
+            );
+
+            ui.add_space(6.0);
             if ui
                 .checkbox(
-                    &mut s.hide_when_idle,
-                    "Прятать, пока инструменты не запущены",
+                    &mut s.circle_show_claude_gpt,
+                    lang.text(
+                        "Заменить шкалу «СЕМЬ ДНЕЙ» на Claude / GPT",
+                        "Replace SEVEN DAYS with Claude / GPT",
+                    ),
+                )
+                .changed()
+            {
+                // The tray checkmark follows on the next frame: update() is
+                // the one place that mirrors settings into the tray.
+                if s.circle_show_claude_gpt {
+                    s.circle_show_weekly_reset = false;
+                }
+                s.save();
+            }
+            ui.label(
+                RichText::new(lang.text(
+                    "Отображает на нижней полуокружности лимит сторонних моделей вместо остатка за семь дней Gemini.",
+                    "Displays third-party model limits on lower semicircle instead of Gemini seven-day quota.",
+                ))
+                .size(12.0)
+                .color(HINT),
+            );
+        });
+
+        card(ui, lang.text("ПОВЕДЕНИЕ ОКНА", "WINDOW BEHAVIOR"), |ui| {
+            let s = &mut self.settings;
+            if ui
+                .checkbox(
+                    &mut s.smart_focus,
+                    lang.text("Умный фокус", "Smart focus"),
                 )
                 .changed()
             {
                 s.save();
             }
             ui.label(
-                RichText::new("Значок в трее остаётся на месте.")
-                    .size(10.5)
-                    .color(HINT),
+                RichText::new(lang.text(
+                    "Показывает виджет, только пока открыто окно Antigravity, Claude или ChatGPT.",
+                    "Shows the widget only while an Antigravity, Claude or ChatGPT window is open.",
+                ))
+                .size(12.0)
+                .color(HINT),
             );
 
-            ui.add_space(4.0);
-            caption(ui, "Заголовок строки");
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 5.0;
-                let mut pick = |ui: &mut egui::Ui, mode: HeaderMode, label: &str| {
-                    if ui.selectable_label(s.header_mode == mode, label).clicked() {
-                        s.header_mode = mode;
-                        s.save();
-                    }
-                };
-                pick(ui, HeaderMode::Full, "Среда и тариф");
-                pick(ui, HeaderMode::FamilyOnly, "Только семейство");
-                pick(ui, HeaderMode::Hidden, "Скрыть");
-            });
+            ui.add_space(6.0);
+            if ui
+                .checkbox(
+                    &mut s.always_on_top,
+                    lang.text(
+                        "Показывать поверх всех окон",
+                        "Show above all windows",
+                    ),
+                )
+                .changed()
+            {
+                s.save();
+            }
+            ui.label(
+                RichText::new(lang.text(
+                    "Виджет остаётся выше любого окна. Без этой галки он держится поверх окон приложений, но обычные окна могут его накрыть.",
+                    "The widget stays above every window. Without it the widget rides over the watched apps' windows, but other windows can cover it.",
+                ))
+                .size(12.0)
+                .color(HINT),
+            );
         });
     }
 
-    fn sources_card(&mut self, ui: &mut egui::Ui) {
-        // Read each family's live state first: the card doubles as the place to
-        // see whether a source is actually being picked up.
+    fn sources_card(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.settings.language;
+        let mut refresh = false;
         let status: Vec<(bool, bool, Option<String>)> = {
             let st = self.shared.states.lock().unwrap();
             Family::ALL
@@ -355,7 +521,7 @@ impl App {
                 .collect()
         };
 
-        card(ui, "ИСТОЧНИКИ", |ui| {
+        card(ui, lang.text("ИСТОЧНИКИ", "SOURCES"), |ui| {
             for f in Family::ALL {
                 let (online, ever, err) = &status[f.idx()];
                 ui.horizontal(|ui| {
@@ -366,153 +532,228 @@ impl App {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let (text, col) = if !self.settings.enabled(f) {
-                            ("выключен".to_string(), HINT)
+                            (lang.text("выключен", "disabled").to_string(), HINT)
                         } else if *online {
-                            ("данные получены".to_string(), ACCENT)
+                            (
+                                lang.text("данные получены", "connected").to_string(),
+                                ACCENT,
+                            )
                         } else if let Some(e) = err {
                             (short(e), WARN)
                         } else if *ever {
-                            ("нет связи".to_string(), WARN)
+                            (lang.text("нет связи", "offline").to_string(), WARN)
                         } else {
-                            ("опрос…".to_string(), HINT)
+                            (lang.text("опрос…", "loading…").to_string(), HINT)
                         };
-                        ui.label(RichText::new(text).size(11.0).color(col));
+                        ui.label(RichText::new(text).size(12.5).color(col));
                     });
                 });
             }
-
-            ui.add_space(4.0);
-            caption(ui, "Что показывать на строке");
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 5.0;
-                let auto = self.settings.active_mode == ActiveMode::Auto;
-                if ui.selectable_label(auto, "Активный").clicked() {
-                    self.settings.active_mode = ActiveMode::Auto;
-                    self.settings.save();
-                }
-                for f in Family::ALL {
-                    if !self.settings.enabled(f) {
-                        continue;
-                    }
-                    let on = self.settings.active_mode == ActiveMode::Pinned
-                        && self.settings.family == f;
-                    if ui.selectable_label(on, f.name()).clicked() {
-                        self.settings.active_mode = ActiveMode::Pinned;
-                        self.settings.family = f;
-                        self.active = f;
-                        self.settings.save();
-                    }
-                }
-            });
-            ui.label(
-                RichText::new("«Активный» — чьё окно было впереди последним.")
-                    .size(10.5)
-                    .color(HINT),
-            );
         });
+
+        refresh |= self.polling_card(ui);
+        refresh
     }
 
     /// Returns true when "обновить сейчас" was pressed.
     fn polling_card(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.settings.language;
         let mut refresh = false;
-        card(ui, "ОПРОС КВОТ", |ui| {
+        card(ui, lang.text("ОПРОС КВОТ", "QUOTA POLLING"), |ui| {
             let s = &mut self.settings;
-            value_row(ui, "Интервал опроса", &format!("{} с", s.poll_secs));
-            if full_width_slider(ui, &mut s.poll_secs, 15..=600) {
+            value_row(
+                ui,
+                lang.text("Интервал опроса", "Polling interval"),
+                &tr_format!(lang, "{} секунд", "{} seconds", s.poll_secs),
+            );
+            // A logarithmic slider: 15…600 s spans 6×, so on a linear track
+            // the presets bunch up at the left end. Log spacing puts every
+            // mark where its number sits.
+            let changed = log_width_slider(ui, &mut s.poll_secs, POLL_MIN..=POLL_MAX);
+            // Preset marks under the slider, one under its own point.
+            if let Some(v) = slider_marks(
+                ui,
+                POLL_MIN as f32,
+                POLL_MAX as f32,
+                &POLL_PRESETS,
+                true,
+                &|v| v == s.poll_secs as f32,
+                &|v| format!("{:.0}", v),
+            ) {
+                s.poll_secs = v as u64;
                 s.save();
             }
-            if ui.button("Обновить сейчас").clicked() {
+            if changed {
+                s.save();
+            }
+
+            ui.add_space(6.0);
+            if ui
+                .button(lang.text("Обновить сейчас", "Refresh now"))
+                .clicked()
+            {
                 refresh = true;
             }
         });
         refresh
     }
 
-    /// Version + the result of the GitHub release check. Returns "check now".
-    fn version_card(&mut self, ui: &mut egui::Ui) -> bool {
-        let (checked, available, failed) = {
-            let st = self.shared.update.lock().unwrap();
-            (st.checked, st.available.clone(), st.error.is_some())
-        };
-        let mut check = false;
-        card(ui, "ВЕРСИЯ", |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(format!("Quotty {}", crate::update::current()))
-                        .size(12.0)
-                        .color(TEXT),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (text, col) = match (&available, checked, failed) {
-                        (Some(u), _, _) => (format!("доступна {}", u.version), WARN),
-                        (None, true, false) => ("актуальная версия".to_string(), ACCENT),
-                        (None, true, true) => ("проверка не удалась".to_string(), HINT),
-                        _ => ("проверка…".to_string(), HINT),
-                    };
-                    ui.label(RichText::new(text).size(11.0).color(col));
-                });
-            });
-            ui.horizontal(|ui| {
-                if ui.button("Проверить обновления").clicked() {
-                    check = true;
-                }
-                if let Some(u) = &available {
-                    ui.hyperlink_to(
-                        RichText::new("Открыть страницу релиза")
-                            .size(11.5)
-                            .color(ACCENT),
-                        u.url.clone(),
-                    );
-                }
-            });
-            ui.label(
-                RichText::new("Раз в 8 часов, только тег релиза на GitHub.")
-                    .size(10.5)
-                    .color(HINT),
-            );
-        });
-        check
-    }
+    /// System settings: Language, Behavior, Windows Integration, Updates, Diagnostics.
+    fn system_card(&mut self, ui: &mut egui::Ui) -> bool {
+        let lang = self.settings.language;
+        let mut check_update = false;
 
-    fn system_card(&mut self, ui: &mut egui::Ui) {
-        card(ui, "СИСТЕМА", |ui| {
+        card(ui, lang.text("ЯЗЫК ИНТЕРФЕЙСА", "INTERFACE LANGUAGE"), |ui| {
+            ui.horizontal(|ui| {
+                let mut changed = ui
+                    .selectable_value(&mut self.settings.language, Language::Russian, "Русский")
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut self.settings.language, Language::English, "English")
+                    .changed();
+                if changed {
+                    self.settings.save();
+                    if let Some(tray) = &self.tray {
+                        tray.set_language(self.settings.language);
+                    }
+                }
+            });
+        });
+
+        card(ui, lang.text("ИНТЕГРАЦИЯ С WINDOWS", "WINDOWS INTEGRATION"), |ui| {
             let mut a = self.autostart;
             if ui
-                .checkbox(&mut a, "Автозапуск при входе (ярлык в Startup)")
+                .checkbox(
+                    &mut a,
+                    lang.text(
+                        "Автозапуск при входе (ярлык в Startup)",
+                        "Start at sign-in (Startup shortcut)",
+                    ),
+                )
                 .changed()
                 && shortcuts::set_autostart(a).is_ok()
             {
                 self.autostart = a;
-                if let Some(t) = &self.tray {
-                    t.autostart_item.set_checked(a);
-                }
             }
-            if ui.button("Создать ярлык на рабочем столе").clicked() {
+            if ui
+                .button(lang.text("Создать ярлык на рабочем столе", "Create desktop shortcut"))
+                .clicked()
+            {
                 let _ = shortcuts::force_desktop_shortcut();
             }
 
-            ui.add_space(6.0);
+            ui.add_space(4.0);
+            if let Some(dir) = crate::config::Settings::dir() {
+                caption(ui, lang.text("Папка настроек", "Settings folder"));
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(dir.display().to_string())
+                            .size(12.0)
+                            .color(HINT),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(lang.text("Открыть", "Open"))
+                            .clicked()
+                        {
+                            reveal_path(&dir);
+                        }
+                    });
+                });
+            }
+        });
+
+        card(ui, lang.text("ВЕРСИЯ И ОБНОВЛЕНИЯ", "VERSION & UPDATES"), |ui| {
+            let (checked, available, failed) = {
+                let st = self.shared.update.lock().unwrap();
+                (st.checked, st.available.clone(), st.error.is_some())
+            };
+
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{} {}",
+                        lang.text("Токпаёк", "Tokpaek"),
+                        crate::update::current()
+                    ))
+                    .size(13.5)
+                    .color(TEXT),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (text, col) = match (&available, checked, failed) {
+                        (Some(u), _, _) => (
+                            tr_format!(lang, "доступна {}", "{} available", u.version),
+                            WARN,
+                        ),
+                        (None, true, false) => (
+                            lang.text("актуальная версия", "up to date").to_string(),
+                            ACCENT,
+                        ),
+                        (None, true, true) => (
+                            lang.text("проверка не удалась", "check failed").to_string(),
+                            HINT,
+                        ),
+                        _ => (lang.text("проверка…", "checking…").to_string(), HINT),
+                    };
+                    ui.label(RichText::new(text).size(12.5).color(col));
+                });
+            });
+
+            ui.horizontal(|ui| {
+                if ui
+                    .button(lang.text("Проверить обновления", "Check for updates"))
+                    .clicked()
+                {
+                    check_update = true;
+                }
+                if let Some(u) = &available {
+                    ui.hyperlink_to(
+                        RichText::new(lang.text("Открыть страницу релиза", "Open release page"))
+                            .size(12.5)
+                            .color(ACCENT),
+                        u.url.clone(),
+                    );
+                } else {
+                    ui.hyperlink_to(
+                        RichText::new(lang.text("Страница релизов", "Releases page"))
+                            .size(12.5)
+                            .color(ACCENT),
+                        "https://github.com/Ilardar/Tokpaek/releases",
+                    );
+                }
+            });
+        });
+
+        card(ui, lang.text("ДИАГНОСТИКА", "DIAGNOSTICS"), |ui| {
             let mut diag = self.settings.diagnostics;
             if ui
-                .checkbox(&mut diag, "Подробная диагностика (файл рядом с exe)")
+                .checkbox(
+                    &mut diag,
+                    lang.text("Подробная диагностика", "Detailed diagnostics"),
+                )
                 .changed()
             {
                 self.settings.diagnostics = diag;
-                crate::providers::set_diagnostics(diag);
+                crate::diaglog::set_diagnostics(diag);
                 self.settings.save();
             }
             ui.label(
-                RichText::new(
-                    "quotty-debug.log: коды ответов и время запросов, без токенов\n\
-                     и имён. Хранится сутки, никуда не отправляется.",
-                )
-                .size(10.5)
+                RichText::new(lang.text(
+                    "Пишет в tokpaek-debug.log коды ответов, адрес API и время запросов.",
+                    "Logs response codes, API addresses and request times to tokpaek-debug.log.",
+                ))
+                .size(12.0)
                 .color(HINT),
             );
-            if ui.button("Показать файл журнала").clicked() {
+            if ui
+                .button(lang.text("Показать файл журнала", "Show log file"))
+                .clicked()
+            {
                 reveal_log();
             }
         });
+
+        check_update
     }
 }
 
@@ -520,29 +761,15 @@ impl App {
 // Small pieces
 // ---------------------------------------------------------------------------
 
-/// How tall the settings window may be, in points: the work area of the monitor
-/// it was opened on, less a margin. Falls back to egui's own monitor size (which
-/// includes the taskbar, hence the larger allowance).
-fn work_area_height(ctx: &egui::Context, area: Option<(i32, i32, i32, i32)>) -> f32 {
-    let ppp = ctx.pixels_per_point().max(0.1);
-    if let Some((_, top, _, bottom)) = area {
-        return (((bottom - top) as f32 / ppp) - 24.0).max(240.0);
-    }
-    match ctx.input(|i| i.viewport().monitor_size) {
-        Some(size) => (size.y - 96.0).max(240.0),
-        None => 700.0,
-    }
-}
-
 /// Section: a dim caption over a rounded card.
 fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    ui.add_space(8.0);
-    ui.label(RichText::new(title).size(10.5).color(DIM));
+    ui.add_space(5.0);
+    ui.label(RichText::new(title).size(12.0).strong().color(DIM));
     ui.add_space(1.0);
     egui::Frame::none()
         .fill(CARD)
         .rounding(Rounding::same(10.0))
-        .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add(ui);
@@ -550,15 +777,16 @@ fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 fn caption(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).size(11.0).color(DIM));
+    ui.label(RichText::new(text).size(12.5).color(DIM));
 }
 
-/// "Label ………… value", the value in the accent colour.
+/// "Label ………… value" — the label in the same face as `caption` (dim,
+/// not strong), the value in the accent colour.
 fn value_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(label).size(12.0).color(TEXT));
+        ui.label(RichText::new(label).size(12.5).color(DIM));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(value).size(12.0).color(ACCENT));
+            ui.label(RichText::new(value).size(12.5).color(ACCENT));
         });
     });
 }
@@ -575,6 +803,100 @@ fn full_width_slider<T: egui::emath::Numeric>(
         .changed()
 }
 
+/// Logarithmic variant: presets spread evenly along the track instead of
+/// bunching up at the small end.
+fn log_width_slider<T: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    value: &mut T,
+    range: std::ops::RangeInclusive<T>,
+) -> bool {
+    ui.spacing_mut().slider_width = ui.available_width() - 6.0;
+    ui.add(egui::Slider::new(value, range).show_value(false).logarithmic(true))
+        .changed()
+}
+
+const OPACITY_MIN: f32 = 0.2;
+const OPACITY_MAX: f32 = 1.0;
+
+/// Widget size bounds and presets, in logical points.
+const SIZE_MIN: u32 = crate::frame_policy::SIZE_MIN;
+const SIZE_MAX: u32 = 600;
+const SIZE_PRESETS: [f32; 6] = [100.0, 200.0, 300.0, 400.0, 500.0, 600.0];
+
+/// Transparency = 1 − opacity, so its slider runs the other way round.
+const TRANSP_MIN: f32 = 0.0;
+const TRANSP_MAX: f32 = 0.8;
+const TRANSP_PRESETS: [f32; 5] = [0.0, 0.2, 0.4, 0.6, 0.8];
+
+const POLL_MIN: u64 = 15;
+const POLL_MAX: u64 = 600;
+/// Preset intervals in seconds, matching the marks under the slider.
+const POLL_PRESETS: [f32; 6] = [600.0, 300.0, 120.0, 60.0, 30.0, 15.0];
+
+/// Clickable labels positioned under a slider's marks: each sits under the
+/// point of the track it stands for. `log` matches a logarithmic slider: the
+/// marks spread by log-distance, not linear. Returns the picked value, if any.
+/// `on` marks the currently selected label, `label` formats one.
+fn slider_marks(
+    ui: &mut egui::Ui,
+    min: f32,
+    max: f32,
+    presets: &[f32],
+    log: bool,
+    on: &dyn Fn(f32) -> bool,
+    label: &dyn Fn(f32) -> String,
+) -> Option<f32> {
+    // The slider is inset by egui's widget padding; match its track closely
+    // enough that labels land under their points.
+    let track_w = (ui.available_width() - 6.0).max(40.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(track_w, 24.0), Sense::hover());
+    let pad = 10.0; // half the handle's width: the value span maps inside it
+    let usable = track_w - 2.0 * pad;
+    let label_w = 46.0;
+    let mut picked = None;
+
+    for &val in presets {
+        let frac = if log {
+            (val.max(min).ln() - min.ln()) / (max.ln() - min.ln())
+        } else {
+            (val - min) / (max - min)
+        };
+        let x = rect.min.x + pad + frac.clamp(0.0, 1.0) * usable;
+        let text = label(val);
+        let col = if on(val) { ACCENT } else { DIM };
+        // Clamped inside the track: the end labels sit flush with the slider's
+        // ends instead of hanging over the card.
+        let cx = x.clamp(rect.min.x + label_w / 2.0, rect.max.x - label_w / 2.0);
+        let label_rect = egui::Rect::from_center_size(
+            egui::Pos2::new(cx, rect.center().y),
+            Vec2::new(label_w, rect.height()),
+        );
+        ui.allocate_new_ui(
+            egui::UiBuilder::new()
+                .max_rect(label_rect)
+                .layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight)),
+            |ui| {
+                // Same face as the buttons (13.0 strong in the app style), so
+                // every clickable element reads the same.
+                let resp = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new(text).size(13.0).strong().color(col),
+                    )
+                    .fill(egui::Color32::TRANSPARENT)
+                    .rounding(egui::Rounding::same(5.0)),
+                );
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if resp.clicked() {
+                    picked = Some(val);
+                }
+            },
+        );
+    }
+    picked
+}
+
 /// A hand-drawn ✕ — the bundled font has no reliable glyph for it.
 fn close_button(ui: &mut egui::Ui) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
@@ -588,7 +910,7 @@ fn close_button(ui: &mut egui::Ui) -> bool {
     }
     let c = rect.center();
     let r = 4.5;
-    let s = Stroke::new(1.6, col);
+    let s = Stroke::new(1.6_f32, col);
     ui.painter()
         .line_segment([c + Vec2::new(-r, -r), c + Vec2::new(r, r)], s);
     ui.painter()
@@ -598,7 +920,7 @@ fn close_button(ui: &mut egui::Ui) -> bool {
 
 /// Open Explorer on the log file (or its folder, when nothing has been logged).
 fn reveal_log() {
-    let Some(path) = crate::providers::log_path() else {
+    let Some(path) = crate::diaglog::log_path() else {
         return;
     };
     let arg = if path.exists() {
@@ -619,6 +941,19 @@ fn reveal_log() {
     }
 }
 
+/// Open Explorer on a folder.
+fn reveal_path(path: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("explorer.exe")
+            .arg(path.as_os_str())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+}
+
 /// Keep an error readable on one line.
 fn short(e: &str) -> String {
     let mut s: String = e.chars().take(30).collect();
@@ -628,168 +963,4 @@ fn short(e: &str) -> String {
     s
 }
 
-// ---------------------------------------------------------------------------
-// Placement
-// ---------------------------------------------------------------------------
 
-/// Work area (left, top, right, bottom, in physical pixels) of the monitor the
-/// pointer is on — captured when the window is opened, so later mouse movement
-/// can't send the window to another screen.
-#[cfg(windows)]
-pub(crate) fn cursor_work_area() -> Option<(i32, i32, i32, i32)> {
-    use windows::Win32::Foundation::POINT;
-    use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-    unsafe {
-        let mut pt = POINT::default();
-        GetCursorPos(&mut pt).ok()?;
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if !GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() {
-            return None;
-        }
-        let w = info.rcWork;
-        Some((w.left, w.top, w.right, w.bottom))
-    }
-}
-
-/// Work area of the monitor a window sits on.
-#[cfg(windows)]
-pub(crate) fn window_work_area(hwnd: isize) -> Option<(i32, i32, i32, i32)> {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    };
-    unsafe {
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        let monitor = MonitorFromWindow(HWND(hwnd as *mut _), MONITOR_DEFAULTTONEAREST);
-        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
-            return None;
-        }
-        let w = info.rcWork;
-        Some((w.left, w.top, w.right, w.bottom))
-    }
-}
-
-#[cfg(not(windows))]
-pub(crate) fn window_work_area(_hwnd: isize) -> Option<(i32, i32, i32, i32)> {
-    None
-}
-
-/// Centre the settings window in `area`. Done through Win32 on the real window:
-/// egui's viewport position is logical and relative to one screen, which lands
-/// in the wrong place on a multi-monitor desktop.
-#[cfg(windows)]
-fn center_window(hwnd: isize, area: Option<(i32, i32, i32, i32)>) -> bool {
-    use windows::Win32::Foundation::{HWND, RECT};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowRect, SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOSIZE,
-    };
-    let Some((left, top, right, bottom)) = area else {
-        return true; // nothing to aim at — leave the window where it is
-    };
-    unsafe {
-        let hwnd = HWND(hwnd as *mut _);
-        let mut win = RECT::default();
-        if GetWindowRect(hwnd, &mut win).is_err() {
-            return false;
-        }
-        let x = left + ((right - left) - (win.right - win.left)) / 2;
-        let y = top + ((bottom - top) - (win.bottom - win.top)) / 2;
-        SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE).is_ok()
-    }
-}
-
-/// Windows 11 rounds and outlines every top-level window itself. On a
-/// borderless window that already paints its own rounded panel it shows up as a
-/// second arc in each corner, so turn both off and let the panel define the
-/// shape — and then make the window's own alpha count, or the pixels outside
-/// that shape are composited as opaque black (G28).
-#[cfg(windows)]
-fn drop_system_chrome(hwnd: windows::Win32::Foundation::HWND) {
-    use windows::Win32::Graphics::Dwm::{
-        DwmEnableBlurBehindWindow, DwmSetWindowAttribute, DWMWA_BORDER_COLOR,
-        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWM_BB_BLURREGION, DWM_BB_ENABLE,
-        DWM_BLURBEHIND,
-    };
-    use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject};
-    const COLOR_NONE: u32 = 0xFFFF_FFFE;
-    unsafe {
-        let pref = DWMWCP_DONOTROUND;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            &pref as *const _ as *const _,
-            std::mem::size_of_val(&pref) as u32,
-        );
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR,
-            &COLOR_NONE as *const _ as *const _,
-            std::mem::size_of_val(&COLOR_NONE) as u32,
-        );
-        // An empty blur region means "blur nothing, just honour the alpha
-        // channel" — the same call winit makes for a transparent window, which
-        // this viewport does not get.
-        let region = CreateRectRgn(0, 0, -1, -1);
-        let blur = DWM_BLURBEHIND {
-            dwFlags: DWM_BB_ENABLE | DWM_BB_BLURREGION,
-            fEnable: true.into(),
-            hRgnBlur: region,
-            fTransitionOnMaximized: false.into(),
-        };
-        let _ = DwmEnableBlurBehindWindow(hwnd, &blur);
-        let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(region.0));
-    }
-}
-
-/// Our own settings window, by title. `FindWindowW` alone matches on title
-/// across every process, so a second Quotty (a dev build beside the installed
-/// one) hands us *its* window — and we then move and re-chrome the wrong one.
-#[cfg(windows)]
-fn own_settings_window() -> Option<isize> {
-    use windows::core::HSTRING;
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::System::Threading::GetCurrentProcessId;
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetWindowThreadProcessId};
-    unsafe {
-        let title = HSTRING::from(WIN_TITLE);
-        let mut prev = HWND::default();
-        loop {
-            let Ok(hwnd) = FindWindowExW(HWND::default(), prev, None, &title) else {
-                return None;
-            };
-            if hwnd.0.is_null() {
-                return None;
-            }
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            if pid == GetCurrentProcessId() {
-                return Some(hwnd.0 as isize);
-            }
-            prev = hwnd;
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn own_settings_window() -> Option<isize> {
-    None
-}
-
-#[cfg(not(windows))]
-pub(crate) fn cursor_work_area() -> Option<(i32, i32, i32, i32)> {
-    None
-}
-
-#[cfg(not(windows))]
-fn center_window(_hwnd: isize, _area: Option<(i32, i32, i32, i32)>) -> bool {
-    true
-}

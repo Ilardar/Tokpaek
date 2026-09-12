@@ -2356,27 +2356,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quotty"
-version = "1.4.0"
-dependencies = [
- "aes-gcm",
- "base64",
- "chrono",
- "dirs 5.0.1",
- "eframe",
- "egui",
- "embed-resource",
- "mslnk",
- "raw-window-handle",
- "rustls",
- "serde",
- "serde_json",
- "tray-icon",
- "ureq",
- "windows",
-]
-
-[[package]]
 name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2870,6 +2849,27 @@ checksum = "b1e27c91459209c2986af3dcf603a5a74a4368754ce37414f59acc971167f643"
 dependencies = [
  "displaydoc",
  "zerovec",
+]
+
+[[package]]
+name = "tokpaek"
+version = "1.9.0"
+dependencies = [
+ "aes-gcm",
+ "base64",
+ "chrono",
+ "dirs 5.0.1",
+ "eframe",
+ "egui",
+ "embed-resource",
+ "mslnk",
+ "raw-window-handle",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tray-icon",
+ "ureq",
+ "windows",
 ]
 
 [[package]]

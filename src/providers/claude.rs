@@ -5,7 +5,7 @@
 //! Covers Claude Code / the Claude CLI too: on Windows they run inside the
 //! Desktop app's account, so the same token and the same quota apply.
 
-use super::{dbg_log, diag, diagnostics_on, Family, FetchError, Limit, LimitWindow, Snapshot};
+use crate::diaglog::{dbg_log, diag, diagnostics_on}; use super::{Family, FetchError, Limit, LimitKind, LimitPool, LimitWindow, Snapshot};
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -121,7 +121,7 @@ fn find_claude_files() -> Result<ClaudeFiles, String> {
                 let stamp = config_meta
                     .modified()
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                if best.as_ref().map_or(true, |(t, _)| stamp > *t) {
+                if best.as_ref().is_none_or(|(t, _)| stamp > *t) {
                     best = Some((
                         stamp,
                         ClaudeFiles {
@@ -186,12 +186,12 @@ fn master_key(local_state_json: &str) -> Result<Vec<u8>, String> {
     let mut blob = key.split_off(5);
 
     unsafe {
-        let mut in_blob = CRYPT_INTEGER_BLOB {
+        let in_blob = CRYPT_INTEGER_BLOB {
             cbData: blob.len() as u32,
             pbData: blob.as_mut_ptr(),
         };
         let mut out_blob = CRYPT_INTEGER_BLOB::default();
-        CryptUnprotectData(&mut in_blob, None, None, None, None, 0, &mut out_blob)
+        CryptUnprotectData(&in_blob, None, None, None, None, 0, &mut out_blob)
             .map_err(|e| format!("CryptUnprotectData: {e}"))?;
 
         let out = std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
@@ -306,7 +306,7 @@ pub fn load_tokens() -> Result<Vec<OauthToken>, String> {
     if scored.is_empty() && !last_err.is_empty() {
         return Err(last_err);
     }
-    scored.sort_by(|a, b| b.0.cmp(&a.0)); // stable: keeps file order within a score
+    scored.sort_by_key(|a| std::cmp::Reverse(a.0)); // stable: keeps file order within a score
     let tokens: Vec<OauthToken> = scored.into_iter().map(|(_, t)| t).collect();
     if tokens.is_empty() {
         return Err("no usable OAuth token (profile scope) in config.json".into());
@@ -358,46 +358,13 @@ enum Failure {
     RateLimited(Option<u64>),
 }
 
-/// How long to sit out sending nothing once *every* token has been refused —
-/// for as long as the server asked, if it said something usable, and five
-/// minutes if it did not.
-const RATE_LIMIT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
-/// Anthropic has been seen asking for 2708 s; anything beyond an hour is more
-/// likely a broken header than a real ban.
-const RATE_LIMIT_MAX: u64 = 3600;
-static COOLDOWN_UNTIL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-
-/// Time left of the cooldown, if one is running.
-fn cooldown_left() -> Option<std::time::Duration> {
-    let until = (*COOLDOWN_UNTIL.lock().unwrap())?;
-    until.checked_duration_since(std::time::Instant::now())
-}
-
-fn set_cooldown(on: bool) {
-    *COOLDOWN_UNTIL.lock().unwrap() = on.then(|| std::time::Instant::now() + RATE_LIMIT_COOLDOWN);
-}
-
-/// Start a cooldown of the length the server asked for. A `Retry-After: 0` is
-/// not an invitation to retry immediately — it is the header carrying nothing,
-/// and taking it at face value turned the cooldown into a 30-second one that
-/// re-asked the refusing endpoint all day. Treat it as absent.
-fn set_cooldown_secs(retry_after: Option<u64>) -> std::time::Duration {
-    let secs = retry_after
-        .filter(|s| *s > 0)
-        .unwrap_or(RATE_LIMIT_COOLDOWN.as_secs())
-        .clamp(30, RATE_LIMIT_MAX);
-    let wait = std::time::Duration::from_secs(secs);
-    *COOLDOWN_UNTIL.lock().unwrap() = Some(std::time::Instant::now() + wait);
-    wait
-}
-
 /// One usage request.
 fn request_usage(access: &str) -> Result<UsageResponse, (Failure, String)> {
     match ureq::get("https://api.anthropic.com/api/oauth/usage")
         .set("Authorization", &format!("Bearer {access}"))
         .set("anthropic-beta", "oauth-2025-04-20")
         .set("anthropic-version", "2023-06-01")
-        .set("User-Agent", "Quotty/0.1")
+        .set("User-Agent", "Tokpaek/0.1")
         .timeout(std::time::Duration::from_secs(20))
         .call()
     {
@@ -446,14 +413,10 @@ fn endpoint_ip() -> String {
 }
 
 /// Fetch a fresh snapshot: reads tokens from disk and tries each against the
-/// usage endpoint until one succeeds.
+/// usage endpoint until one succeeds. Waiting after a 429 is not this
+/// module's job — it reports `rate_limited` plus the server's `Retry-After`,
+/// and the poller's `RetryPolicy` decides the cooldown.
 pub fn fetch() -> Result<Snapshot, FetchError> {
-    if let Some(left) = cooldown_left() {
-        return Err(FetchError::rate_limited(format!(
-            "лимит запросов, пауза {} мин",
-            (left.as_secs() / 60) + 1
-        )));
-    }
     let mut tokens = load_tokens()?;
 
     // Try the previously-working token first.
@@ -479,21 +442,20 @@ pub fn fetch() -> Result<Snapshot, FetchError> {
     let mut last_err = "no token tried".to_string();
     // Set once some entry was refused as too frequent, holding the longest
     // `Retry-After` any of them asked for. Only a poll where *nothing* got
-    // through starts a cooldown.
+    // through reports a throttle.
     let mut throttled: Option<Option<u64>> = None;
     for tok in &tokens {
         let started = std::time::Instant::now();
         match request_usage(&tok.access) {
             Ok(usage) => {
                 *LAST_GOOD.lock().unwrap() = Some(tok.access.clone());
-                set_cooldown(false);
                 diag(&format!(
                     "claude: 200 in {} ms (token {}/{})",
                     started.elapsed().as_millis(),
                     tok.source,
                     tok.subscription.as_deref().unwrap_or("-")
                 ));
-                return Ok(build_snapshot(usage, tok));
+                return Ok(build_snapshot(usage));
             }
             Err((what, msg)) => {
                 dbg_log(&format!(
@@ -521,20 +483,16 @@ pub fn fetch() -> Result<Snapshot, FetchError> {
     }
     *LAST_GOOD.lock().unwrap() = None;
     if let Some(retry_after) = throttled {
-        let wait = set_cooldown_secs(retry_after);
-        let mins = (wait.as_secs() / 60).max(1);
-        diag(&format!(
-            "claude: every token rate limited, sleeping {}s",
-            wait.as_secs()
+        diag("claude: every token rate limited");
+        return Err(FetchError::rate_limited_for(
+            "лимит запросов Claude",
+            retry_after,
         ));
-        return Err(FetchError::rate_limited(format!(
-            "лимит запросов, пауза {mins} мин"
-        )));
     }
     Err(format!("usage request: {last_err}").into())
 }
 
-fn build_snapshot(usage: UsageResponse, tok: &OauthToken) -> Snapshot {
+fn build_snapshot(usage: UsageResponse) -> Snapshot {
     let now = Utc::now();
     let mut limits = Vec::new();
 
@@ -548,27 +506,31 @@ fn build_snapshot(usage: UsageResponse, tok: &OauthToken) -> Snapshot {
     if let Some(w) = usage.five_hour {
         limits.push(Limit {
             title: "5-hour limit".into(),
+            kind: LimitKind::Session,
+            pool: LimitPool::Own,
             used_percent: w.utilization.unwrap_or(0.0) as f32,
             window: parse_ts(&w.resets_at)
                 .map(|reset| LimitWindow::ending_at(reset, chrono::Duration::hours(5), now)),
+            weekly: None,
         });
     }
     if let Some(w) = usage.seven_day {
         limits.push(Limit {
             title: "Weekly · all models".into(),
+            kind: LimitKind::Weekly,
+            pool: LimitPool::Own,
             used_percent: w.utilization.unwrap_or(0.0) as f32,
             window: parse_ts(&w.resets_at)
                 .map(|reset| LimitWindow::ending_at(reset, chrono::Duration::days(7), now)),
+            weekly: None,
         });
     }
     for l in &limits {
         diag(&format!("claude: {}", describe(l, now)));
     }
 
-    let plan = pretty_plan(tok.subscription.as_deref(), tok.tier.as_deref());
     Snapshot {
         family: Family::Claude,
-        plan,
         limits,
     }
 }
@@ -591,42 +553,8 @@ fn describe(l: &Limit, now: DateTime<Utc>) -> String {
     format!("{} {:.0}%, {when}", l.title, l.used_percent)
 }
 
-fn pretty_plan(sub: Option<&str>, tier: Option<&str>) -> String {
-    match sub {
-        Some("max") => {
-            if let Some(t) = tier {
-                if t.contains("20x") {
-                    return "Claude Max 20×".into();
-                }
-                if t.contains("5x") {
-                    return "Claude Max 5×".into();
-                }
-            }
-            "Claude Max".into()
-        }
-        Some("pro") => "Claude Pro".into(),
-        Some(other) => format!("Claude {other}"),
-        None => "Claude".into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{cooldown_left, set_cooldown, OauthToken, RATE_LIMIT_COOLDOWN};
-
-    #[test]
-    fn rate_limit_gate_holds_then_releases() {
-        set_cooldown(true);
-        let left = cooldown_left().expect("a cooldown must be running");
-        assert!(left <= RATE_LIMIT_COOLDOWN);
-        assert!(left > RATE_LIMIT_COOLDOWN - std::time::Duration::from_secs(5));
-        set_cooldown(false);
-        assert!(
-            cooldown_left().is_none(),
-            "a success must clear the cooldown"
-        );
-    }
-
     /// A 5-hour window only starts at the first request of a session; until
     /// then the service sends `resets_at: null`. The row must still appear.
     #[test]
@@ -637,7 +565,7 @@ mod tests {
         )
         .expect("parse");
 
-        let snap = super::build_snapshot(usage, &a_token());
+        let snap = super::build_snapshot(usage);
         assert_eq!(snap.limits.len(), 2, "both rows belong on screen");
         assert_eq!(snap.limits[0].title, "5-hour limit");
         assert!(
@@ -660,7 +588,7 @@ mod tests {
         ))
         .expect("parse");
 
-        let snap = super::build_snapshot(usage, &a_token());
+        let snap = super::build_snapshot(usage);
         let w = snap.limits[0]
             .window
             .expect("the reset time is still known");
@@ -690,7 +618,7 @@ mod tests {
                 .set("Authorization", &format!("Bearer {}", tok.access))
                 .set("anthropic-beta", "oauth-2025-04-20")
                 .set("anthropic-version", "2023-06-01")
-                .set("User-Agent", "Quotty/0.1")
+                .set("User-Agent", "Tokpaek/0.1")
                 .timeout(std::time::Duration::from_secs(20))
                 .call()
             {
@@ -708,15 +636,6 @@ mod tests {
                 }
                 Err(e) => println!("{}: {e}", tok.source),
             }
-        }
-    }
-
-    fn a_token() -> OauthToken {
-        OauthToken {
-            access: String::new(),
-            subscription: Some("max".into()),
-            tier: None,
-            source: "V2",
         }
     }
 }

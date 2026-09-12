@@ -1,5 +1,5 @@
-﻿<#
-    Quotty diagnostics — collects everything needed to explain why a source is
+<#
+    Tokpaek diagnostics — collects everything needed to explain why a source is
     offline, without changing the program. Writes a single report next to
     itself and prints it.
 
@@ -15,7 +15,7 @@ param([string]$Out)
 # empty.
 if (-not $Out) {
     $dir = if ($PSScriptRoot) { $PSScriptRoot } else { $env:TEMP }
-    $Out = Join-Path $dir 'quotty-report.txt'
+    $Out = Join-Path $dir 'tokpaek-report.txt'
 }
 
 $r = [System.Collections.Generic.List[string]]::new()
@@ -27,26 +27,27 @@ function Mask($s) {
     return $s.Substring(0, 8) + '…<' + $s.Length + ' chars>'
 }
 
-Add "=== Quotty diagnostics ==="
+Add "=== Tokpaek diagnostics ==="
 Add ("time         : " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'))
 Add ("windows      : " + (Get-CimInstance Win32_OperatingSystem).Caption + ' ' + [Environment]::OSVersion.Version)
 Add ("elevated     : " + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
 Add ("APPDATA      : " + $env:APPDATA)
 Add ("LOCALAPPDATA : " + $env:LOCALAPPDATA)
 
-# ---------------------------------------------------------------- Quotty ----
+# ---------------------------------------------------------------- Tokpaek ----
 Add ""
-Add "--- Quotty ---"
+Add "--- Tokpaek ---"
 $exes = @()
-$proc = Get-Process -Name quotty -ErrorAction SilentlyContinue
+$proc = Get-Process -Name tokpaek,quotty -ErrorAction SilentlyContinue
 foreach ($p in $proc) { $exes += $p.Path; Add ("running      : pid " + $p.Id + '  ' + $p.Path) }
 if (-not $proc) { Add "running      : no" }
-foreach ($c in @("$env:LOCALAPPDATA\Programs\Quotty\quotty.exe", "$env:ProgramFiles\Quotty\quotty.exe")) {
+foreach ($c in @("$env:LOCALAPPDATA\Programs\Tokpaek\tokpaek.exe", "$env:ProgramFiles\Tokpaek\tokpaek.exe", "$env:LOCALAPPDATA\Programs\Quotty\quotty.exe", "$env:ProgramFiles\Quotty\quotty.exe")) {
     if (Test-Path $c) { $exes += $c; Add ("installed    : " + $c) }
 }
 foreach ($exe in ($exes | Select-Object -Unique)) {
     Add ("version      : " + (Get-Item $exe).VersionInfo.FileVersion + '  (' + $exe + ')')
-    $log = Join-Path (Split-Path $exe) 'quotty-debug.log'
+    $log = Join-Path (Split-Path $exe) 'tokpaek-debug.log'
+    if (-not (Test-Path $log)) { $log = Join-Path (Split-Path $exe) 'quotty-debug.log' }
     if (Test-Path $log) {
         Add ("debug log    : " + $log + '  ' + (Get-Item $log).Length + ' bytes, last write ' + (Get-Item $log).LastWriteTime)
         $lines = Get-Content $log -Encoding UTF8 -ErrorAction SilentlyContinue
@@ -66,7 +67,8 @@ foreach ($exe in ($exes | Select-Object -Unique)) {
         Add ("debug log    : none next to " + $exe + "  (that file only appears on failures)")
     }
 }
-$settings = Join-Path $env:APPDATA 'Quotty\settings.json'
+$settings = Join-Path $env:APPDATA 'Tokpaek\settings.json'
+if (-not (Test-Path $settings)) { $settings = Join-Path $env:APPDATA 'Quotty\settings.json' }
 Add ("settings     : " + $settings + '  exists=' + (Test-Path $settings))
 
 # ---------------------------------------------------------------- Claude ----
@@ -78,7 +80,7 @@ $pkg = Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object { $_.Name -m
 if ($pkg) { foreach ($p in $pkg) { Add ("store build  : " + $p.Name + ' ' + $p.Version + '  family=' + $p.PackageFamilyName) } }
 else { Add "store build  : not installed from the Microsoft Store" }
 
-# The same candidate list Quotty walks.
+# The same candidate list Tokpaek walks.
 $dirs = @((Join-Path $env:APPDATA 'Claude'))
 Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Packages') -Directory -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match '^(?i)claude' -or $_.Name -match '(?i)anthropic' } |
@@ -148,7 +150,7 @@ try {
 } catch { Add ("https probe  : " + $_.Exception.Message) }
 
 Add ""
-Add "--- proxy (Claude honours the system proxy, Quotty talks direct) ---"
+Add "--- proxy (Claude honours the system proxy, Tokpaek talks direct) ---"
 Add ("winhttp      : " + ((netsh winhttp show proxy) -join ' / '))
 $ie = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
 Add ("ie proxy     : enable=" + $ie.ProxyEnable + ' server=' + $ie.ProxyServer)
@@ -161,14 +163,14 @@ Add "                      (Claude Desktop signed out, or its token was rotated)
 Add "https probe 429     : Anthropic is rate-limiting this IP; every source stays"
 Add "                      offline until it lets go — waiting is the only cure"
 Add "https probe no reply: no route at all — region block, firewall, VPN off"
-Add "config.json MISSING : Quotty is looking in the wrong place; send the candidate list"
-Add "debug log absent    : Quotty has not failed since it started — restart it, reproduce,"
+Add "config.json MISSING : Tokpaek is looking in the wrong place; send the candidate list"
+Add "debug log absent    : Tokpaek has not failed since it started — restart it, reproduce,"
 Add "                      then run this script again"
 
 try {
     $r | Set-Content -Path $Out -Encoding UTF8 -ErrorAction Stop
 } catch {
-    $Out = Join-Path $env:TEMP 'quotty-report.txt'
+    $Out = Join-Path $env:TEMP 'tokpaek-report.txt'
     $r | Set-Content -Path $Out -Encoding UTF8
 }
 Write-Output ($r -join [Environment]::NewLine)

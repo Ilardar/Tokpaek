@@ -1,16 +1,17 @@
-//! The Quotty window (a compact, movable, translucent strip) plus tray wiring.
+//! The Tokpaek window (a compact, movable, translucent circle gauge) plus tray wiring.
 
 use crate::active;
-use crate::config::{ActiveMode, HeaderMode, Settings, StripSize};
+use crate::config::Settings;
+use crate::i18n::Language;
 use crate::providers::{self, Family, Snapshot};
 use crate::shortcuts;
 use crate::tray::Tray;
 use crate::update::{self, UpdateState};
+use crate::windowing;
 
-use chrono::{DateTime, Duration, Local, Utc};
 use eframe::egui;
-use egui::{Align2, Color32, FontId, PointerButton, Pos2, Rect, Sense, Vec2, ViewportCommand};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use egui::{PointerButton, Pos2, Sense, Vec2, ViewportCommand};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Latest fetch state of one family. `last` keeps the most recent *successful*
@@ -23,203 +24,10 @@ pub struct FetchState {
     pub error: Option<String>,
     /// The last poll failed only because the service is throttling us. The
     /// numbers we already have are still true, so they stay on screen.
-    pub rate_limited: bool,
+     pub rate_limited: bool,
 }
 
-/// What the strip needs to know about the family it is drawing.
-struct ActiveState {
-    online: bool,
-    /// Values on screen are the last good ones; the service is throttling us.
-    stale: bool,
-    ever: bool,
-    last: Option<Snapshot>,
-    error: Option<String>,
-}
 
-/// `want`/`enabled` sentinel: no family singled out for an immediate poll.
-const NO_FAMILY: u8 = 0xFF;
-
-/// How much of the reset time a design has room for.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ResetStyle {
-    /// "Resets 14:05 · 2h 5m"
-    Full,
-    /// "2h 5m"
-    Rel,
-    /// "2h"
-    Tiny,
-}
-
-impl ResetStyle {
-    fn render(self, (abs, rel, tiny): &(String, String, String)) -> String {
-        match self {
-            ResetStyle::Full => format!("Resets {abs} · {rel}"),
-            ResetStyle::Rel => rel.clone(),
-            ResetStyle::Tiny => tiny.clone(),
-        }
-    }
-}
-
-/// Every number one strip design is made of. The three designs differ only in
-/// these values plus `inline`, so the drawing code below is written once.
-struct Metrics {
-    /// Stacked design only: the window's width. The inline ones derive theirs
-    /// from the columns (`Metrics::width`).
-    fixed_w: f32,
-    pad_x: f32,
-    pad_top: f32,
-    pad_bottom: f32,
-    /// Height of the header/status line (always drawn — the status word lives
-    /// there even when the header text is switched off).
-    header_h: f32,
-    header_font: f32,
-    status_font: f32,
-    dot_r: f32,
-    /// Vertical stride of one limit row.
-    row_h: f32,
-    /// Where the bar sits inside its row.
-    bar_dy: f32,
-    bar_h: f32,
-    title_font: f32,
-    pct_font: f32,
-    reset_font: f32,
-    /// Title and numbers sit *beside* the bar instead of above it.
-    inline: bool,
-    /// Inline only: is there a (short) title column left of the bar? Its width
-    /// is measured from the titles actually on screen, not fixed here.
-    titles: bool,
-    /// Inline only: the bar's own length — the window is sized around it.
-    bar_w: f32,
-    /// Inline only: column reserved right of the bar for percent + countdown.
-    text_w: f32,
-    reset_style: ResetStyle,
-    /// Stands in for the countdown before the service opens the window.
-    no_window: &'static str,
-    round: f32,
-    bar_round: f32,
-}
-
-impl Metrics {
-    /// Window width. The stacked design has a fixed one and spreads the bar
-    /// across it; the inline ones are exactly their columns wide, so a short
-    /// title column (Claude's "5h"/"7d") pulls the right edge in with it.
-    fn width(&self, title_w: f32) -> f32 {
-        if self.inline {
-            2.0 * self.pad_x + title_w + self.bar_w + self.text_w
-        } else {
-            self.fixed_w
-        }
-    }
-}
-
-impl StripSize {
-    fn metrics(self) -> Metrics {
-        match self {
-            StripSize::Normal => Metrics {
-                fixed_w: 386.0,
-                pad_x: 7.0,
-                // Both are smaller than `pad_x` on purpose, so that all four
-                // margins *measure* 7 px on screen: the header's glyphs start
-                // ~4 px below the top of their text box, and the last row's
-                // trailing space (row_h - bar_dy - bar_h) already sits under
-                // the bottom bar.
-                pad_top: 3.0,
-                pad_bottom: 5.0,
-                header_h: 18.0,
-                header_font: 12.5,
-                status_font: 11.5,
-                dot_r: 3.2,
-                row_h: 33.0,
-                bar_dy: 17.0,
-                bar_h: 13.0,
-                title_font: 12.5,
-                pct_font: 12.5,
-                reset_font: 12.0,
-                inline: false,
-                titles: true,
-                bar_w: 0.0,
-                text_w: 0.0,
-                reset_style: ResetStyle::Full,
-                no_window: "окно ещё не начато",
-                round: 8.0,
-                bar_round: 4.5,
-            },
-            StripSize::Mini => Metrics {
-                fixed_w: 0.0,
-                pad_x: 8.0,
-                pad_top: 6.0,
-                pad_bottom: 5.0,
-                header_h: 16.0,
-                header_font: 11.5,
-                status_font: 10.5,
-                dot_r: 2.8,
-                row_h: 21.0,
-                bar_dy: 4.5,
-                bar_h: 12.0,
-                title_font: 11.0,
-                pct_font: 12.0,
-                reset_font: 11.0,
-                inline: true,
-                titles: true,
-                bar_w: 174.0,
-                text_w: 74.0,
-                reset_style: ResetStyle::Rel,
-                no_window: "не начато",
-                round: 7.0,
-                bar_round: 4.0,
-            },
-            StripSize::Nano => Metrics {
-                fixed_w: 0.0,
-                pad_x: 6.0,
-                pad_top: 5.0,
-                pad_bottom: 4.0,
-                header_h: 14.0,
-                header_font: 10.5,
-                status_font: 10.0,
-                dot_r: 2.4,
-                row_h: 15.0,
-                bar_dy: 3.0,
-                bar_h: 9.0,
-                title_font: 10.5,
-                pct_font: 11.0,
-                reset_font: 10.5,
-                inline: true,
-                titles: false,
-                bar_w: 148.0,
-                text_w: 54.0,
-                reset_style: ResetStyle::Tiny,
-                no_window: "—",
-                round: 6.0,
-                bar_round: 3.5,
-            },
-        }
-    }
-}
-
-/// The text colours and the alpha every strip colour is built from — all a
-/// function of the opacity setting alone.
-struct Palette {
-    op: f32,
-    text_a: u8,
-    dim: Color32,
-    /// Between `dim` and `strong`: the countdown on the small designs, where
-    /// `dim` at that size was hard to read.
-    mid: Color32,
-    strong: Color32,
-}
-
-impl Palette {
-    fn new(op: f32) -> Self {
-        let text_a = ((0.35 + 0.65 * op) * 255.0) as u8;
-        Self {
-            op,
-            text_a,
-            dim: Color32::from_rgba_unmultiplied(190, 196, 210, text_a),
-            mid: Color32::from_rgba_unmultiplied(214, 220, 233, text_a),
-            strong: Color32::from_rgba_unmultiplied(232, 236, 245, text_a),
-        }
-    }
-}
 
 pub struct Shared {
     /// One state per family, indexed by `Family::idx`.
@@ -241,6 +49,7 @@ pub struct App {
     pub(crate) shared: Arc<Shared>,
     pub(crate) tray: Option<Tray>,
     pub(crate) show_settings: bool,
+    pub(crate) settings_tab: crate::settings_ui::SettingsTab,
     /// Set on open: the settings window still has to be moved to the monitor
     /// the user called it from.
     pub(crate) settings_center: bool,
@@ -249,28 +58,30 @@ pub struct App {
     /// The settings window itself, resolved once it exists (see
     /// `own_settings_window`); it is ours to move and to re-chrome.
     pub(crate) settings_hwnd: Option<isize>,
-    /// Height the settings window is currently sized to (fitted to content).
-    pub(crate) settings_h: f32,
     pub(crate) autostart: bool,
     /// Family currently on screen.
     pub(crate) active: Family,
-    detector: active::Detector,
+    is_ai_active: bool,
+    /// The foreground window belongs to a watched app (published by the
+    /// watcher thread; the frame never probes Win32 itself).
+    foreground_watched: bool,
     /// Size we last asked the OS for, so we only resize when it changes.
     applied_size: Vec2,
-    /// Width of the inline designs' title column, measured once a frame from
-    /// the titles actually on screen (`Metrics::width`).
-    title_w: f32,
     /// Nothing to watch: the strip is still there, but paints nothing and lets
     /// clicks through (see `set_click_through`).
     idle_hidden: bool,
-    /// Cached "Resets …" strings, refreshed at most once per second.
-    reset_cache: Vec<Option<(String, String, String)>>,
-    reset_cache_sec: i64,
+    /// The user asked for the widget to be minimized (tray / context menu).
+    /// Distinct from Smart Focus hiding: `idle_hidden` is recomputed every
+    /// frame from `should_hide`, so a hand-toggle written straight into it was
+    /// undone on the next frame — this is why "hide" never worked.
+    manual_hidden: bool,
+    pub(crate) manual_unhide_until: f64,
     /// Throttle for persisting the auto-switched family.
     last_family_save: f64,
     /// Tray menu events, delivered via a handler that also wakes the UI so
     /// changes are applied immediately, not on next hover.
     menu_rx: std::sync::mpsc::Receiver<tray_icon::menu::MenuEvent>,
+    tray_rx: std::sync::mpsc::Receiver<tray_icon::TrayIconEvent>,
     /// Last time (s) we re-asserted always-on-top so the taskbar can't cover us.
     last_topmost: f64,
     /// Native window handle, resolved lazily from `eframe::Frame`.
@@ -293,28 +104,119 @@ fn native_hwnd(frame: &eframe::Frame) -> Option<isize> {
     }
 }
 
-/// Put the window back at the top of the topmost band, without stealing focus.
+pub(crate) static NATIVE_HWND: AtomicIsize = AtomicIsize::new(0);
+pub(crate) static SUBCLASSED: AtomicBool = AtomicBool::new(false);
+pub(crate) static ACTIVATE_MSG: AtomicU32 = AtomicU32::new(0);
+pub(crate) static INSTANCE_ACTIVATED: AtomicBool = AtomicBool::new(false);
+
 #[cfg(windows)]
-fn force_topmost(hwnd: isize) {
-    use windows::Win32::Foundation::HWND;
+unsafe extern "system" fn instance_subclass_proc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+    _uid_subclass: usize,
+    _dw_ref_data: usize,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::Shell::DefSubclassProc;
+
+    let activate_msg = ACTIVATE_MSG.load(Ordering::Relaxed);
+    if activate_msg != 0 && msg == activate_msg {
+        INSTANCE_ACTIVATED.store(true, Ordering::Relaxed);
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(hwnd, None, false);
+    }
+
+    DefSubclassProc(hwnd, msg, wparam, lparam)
+}
+
+/// The widget's right-click menu — the second adapter over the shared
+/// `MenuAction` vocabulary (the first is tray.rs). Returns the picked action.
+#[cfg(windows)]
+fn show_context_menu(hwnd: isize, state: &ContextMenuState) -> Option<crate::menu::MenuAction> {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::{HWND, POINT};
     use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+        AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, SetForegroundWindow,
+        TrackPopupMenu, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_LEFTALIGN,
+        TPM_RETURNCMD, TPM_TOPALIGN,
     };
+
+    // Command ids: 1 refresh, 9 home, 8 always-on-top, 4 settings, 7 quit.
+    let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
     unsafe {
-        let _ = SetWindowPos(
-            HWND(hwnd as *mut _),
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+        let hmenu = CreatePopupMenu().ok()?;
+
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING,
+            1,
+            &HSTRING::from(state.lang.text("Обновить", "Refresh")),
         );
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING,
+            9,
+            &HSTRING::from(state.lang.text("Домой", "Home")),
+        );
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING | check(state.always_on_top),
+            8,
+            &HSTRING::from(state.lang.text(
+                "Показывать поверх всех окон",
+                "Show above all windows",
+            )),
+        );
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING,
+            4,
+            &HSTRING::from(state.lang.text("Настройки", "Settings")),
+        );
+        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING,
+            7,
+            &HSTRING::from(state.lang.text("Закрыть", "Quit")),
+        );
+
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let _ = SetForegroundWindow(HWND(hwnd as *mut _));
+        let cmd = TrackPopupMenu(
+            hmenu,
+            TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
+            pt.x,
+            pt.y,
+            0,
+            HWND(hwnd as *mut _),
+            None,
+        );
+        let _ = DestroyMenu(hmenu);
+        use crate::menu::MenuAction;
+        match cmd.0 as usize {
+            1 => Some(MenuAction::Refresh),
+            9 => Some(MenuAction::Home),
+            // A check item click flips it; carry the new state.
+            8 => Some(MenuAction::AlwaysOnTop(!state.always_on_top)),
+            4 => Some(MenuAction::OpenSettings),
+            7 => Some(MenuAction::Quit),
+            _ => None,
+        }
     }
 }
 
+/// The facts the widget context menu is drawn from.
+struct ContextMenuState {
+    always_on_top: bool,
+    lang: Language,
+}
+
 #[cfg(not(windows))]
-fn force_topmost(_hwnd: isize) {}
+fn show_context_menu(_hwnd: isize, _state: &ContextMenuState) -> Option<crate::menu::MenuAction> {
+    None
+}
 
 // ---------------------------------------------------------------------------
 // Repaint backstop
@@ -376,11 +278,10 @@ fn arm_repaint_timer(_hwnd: isize, _period_ms: u32) {}
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, settings: Settings) -> Self {
-        let _ = shortcuts::ensure_desktop_shortcut();
         crate::settings_ui::apply_style(&cc.egui_ctx);
-        providers::set_diagnostics(settings.diagnostics);
-        providers::diag(&format!(
-            "--- quotty {} started, diagnostics on ---",
+        crate::diaglog::set_diagnostics(settings.diagnostics);
+        crate::diaglog::diag(&format!(
+            "--- tokpaek {} started, diagnostics on ---",
             update::current()
         ));
 
@@ -393,24 +294,44 @@ impl App {
             refresh: AtomicBool::new(false),
             interval: AtomicU64::new(settings.poll_secs),
             enabled: AtomicU8::new(settings.enabled_mask()),
-            want: AtomicU8::new(NO_FAMILY),
+            want: AtomicU8::new(crate::scheduler::NO_FAMILY),
             update: Mutex::new(UpdateState::default()),
             update_now: AtomicBool::new(false),
         });
         spawn_poller(shared.clone(), cc.egui_ctx.clone());
         spawn_update_checker(shared.clone(), cc.egui_ctx.clone());
 
+        active::spawn_watcher(cc.egui_ctx.clone());
+
         let autostart = shortcuts::is_autostart_enabled();
-        let tray = Tray::new(autostart).ok();
+        let tray = Tray::new(settings.always_on_top, settings.language).ok();
 
         // Route tray menu events through our own channel and wake the UI on each
         // one, so a menu choice is applied immediately instead of on the next
         // timer tick / mouse hover.
+        //
+        // Quit is the one action handled right here, on the tray thread:
+        // routing it through a frame meant waiting for the event loop to wake
+        // up (and sometimes a second click) — the slow-exit bug. Settings are
+        // flushed on their 500 ms throttle, and flushed once more here, so
+        // exiting immediately loses nothing.
         let (menu_tx, menu_rx) = std::sync::mpsc::channel();
         let wake = cc.egui_ctx.clone();
-        tray_icon::menu::MenuEvent::set_event_handler(Some(move |ev| {
+        tray_icon::menu::MenuEvent::set_event_handler(Some(move |ev: tray_icon::menu::MenuEvent| {
+            if ev.id == tray_icon::menu::MenuId(crate::tray::QUIT_MENU_ID.to_string()) {
+                Settings::flush_now();
+                crate::diaglog::flush_log();
+                std::process::exit(0);
+            }
             let _ = menu_tx.send(ev);
             wake.request_repaint();
+        }));
+
+        let (tray_tx, tray_rx) = std::sync::mpsc::channel();
+        let wake_tray = cc.egui_ctx.clone();
+        tray_icon::TrayIconEvent::set_event_handler(Some(move |ev| {
+            let _ = tray_tx.send(ev);
+            wake_tray.request_repaint();
         }));
 
         Self {
@@ -419,19 +340,20 @@ impl App {
             shared,
             tray,
             show_settings: false,
+            settings_tab: crate::settings_ui::SettingsTab::Appearance,
             settings_center: false,
             settings_area: None,
             settings_hwnd: None,
-            settings_h: 640.0,
             autostart,
-            detector: active::Detector::default(),
+            is_ai_active: true,
+            foreground_watched: false,
             applied_size: Vec2::ZERO,
-            title_w: 0.0,
             idle_hidden: false,
-            reset_cache: Vec::new(),
-            reset_cache_sec: 0,
+            manual_hidden: false,
+            manual_unhide_until: 0.0,
             last_family_save: f64::MIN,
             menu_rx,
+            tray_rx,
             last_topmost: 0.0,
             hwnd: None,
             timer_period: 0,
@@ -446,50 +368,136 @@ impl App {
     pub(crate) fn open_settings(&mut self, from_strip: bool) {
         self.show_settings = true;
         self.settings_center = true;
+        // Only clear the *manual* flag: `idle_hidden` belongs to the hide
+        // transition in update(), which is what flips MousePassthrough back
+        // off. Writing idle_hidden here directly left the window painted but
+        // still click-through — visible yet impossible to interact with.
+        self.manual_hidden = false;
+        self.manual_unhide_until = f64::MAX;
         self.settings_area = from_strip
-            .then(|| self.hwnd.and_then(crate::settings_ui::window_work_area))
+            .then(|| self.hwnd.and_then(crate::windowing::window_work_area))
             .flatten()
-            .or_else(crate::settings_ui::cursor_work_area);
-    }
-
-    fn handle_tray_events(&mut self, ctx: &egui::Context) {
-        while let Ok(ev) = self.menu_rx.try_recv() {
-            let id = ev.id;
-            let Some(tray) = &self.tray else { continue };
-
-            if id == tray.id_quit {
-                ctx.send_viewport_cmd(ViewportCommand::Close);
-            } else if id == tray.id_refresh {
-                self.shared.refresh.store(true, Ordering::Relaxed);
-                ctx.request_repaint();
-            } else if id == tray.id_settings {
-                self.open_settings(false);
-            } else if id == tray.id_autostart {
-                let now_checked = tray.autostart_item.is_checked();
-                match shortcuts::set_autostart(now_checked) {
-                    Ok(_) => self.autostart = now_checked,
-                    Err(_) => tray.autostart_item.set_checked(!now_checked),
-                }
+            .or_else(crate::windowing::cursor_work_area);
+        #[cfg(windows)]
+        if let Some(h) = self.hwnd {
+            unsafe {
+                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
+                    windows::Win32::Foundation::HWND(h as *mut _),
+                    None,
+                    false,
+                );
+            }
+            // Z-order itself is the verdict executor's job — facts only here.
+        }
+        #[cfg(windows)]
+        if let Some(h) = self.settings_hwnd {
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    BringWindowToTop, SetForegroundWindow,
+                };
+                let hwnd = windows::Win32::Foundation::HWND(h as *mut _);
+                let _ = BringWindowToTop(hwnd);
+                let _ = SetForegroundWindow(hwnd);
             }
         }
     }
 
-    /// Follow the foreground window (or the pinned choice) and, on a switch,
-    /// ask the poller to refresh that family right away.
+    /// The one place every menu action's effect lives — the tray menu and the
+    /// widget's context menu are adapters that translate clicks into
+    /// `MenuAction`, and nothing else.
+    fn apply_menu_action(&mut self, action: crate::menu::MenuAction, ctx: &egui::Context) {
+        use crate::menu::MenuAction;
+        match action {
+            MenuAction::Quit => {
+                // Persist everything, then exit directly: winit's window
+                // teardown plus the tray icon's Shell_NotifyIcon delete could
+                // hang for seconds, and nothing else needs a graceful
+                // shutdown once state is on disk.
+                Settings::flush_now();
+                crate::diaglog::flush_log();
+                std::process::exit(0);
+            }
+            MenuAction::Refresh => {
+                self.shared.refresh.store(true, Ordering::Relaxed);
+                ctx.request_repaint();
+            }
+            MenuAction::Home => {
+                // Back to the default spot: the screen's top-left corner.
+                self.settings.pos = Some((0.0, 0.0));
+                self.settings.save();
+                #[cfg(windows)]
+                if let Some(h) = self.hwnd {
+                    windowing::home(h);
+                }
+                ctx.request_repaint();
+            }
+            MenuAction::OpenSettings => {
+                self.open_settings(false);
+                ctx.request_repaint();
+            }
+            // The check state arrives from the menu item itself; settings
+            // follow it, and the verdict executor applies the z-band.
+            MenuAction::AlwaysOnTop(on) => {
+                self.settings.always_on_top = on;
+                self.settings.save();
+                // Expire the z-order cadence so the new band lands next frame.
+                self.last_topmost = f64::MIN;
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    fn handle_tray_events(&mut self, ctx: &egui::Context) {
+        while let Ok(ev) = self.menu_rx.try_recv() {
+            let Some(tray) = &self.tray else { continue };
+            let Some(action) = tray.action(&ev.id) else {
+                continue;
+            };
+            self.apply_menu_action(action, ctx);
+        }
+
+        while let Ok(ev) = self.tray_rx.try_recv() {
+            match ev {
+                tray_icon::TrayIconEvent::Click {
+                    button: tray_icon::MouseButton::Left,
+                    button_state: tray_icon::MouseButtonState::Up,
+                    ..
+                }
+                | tray_icon::TrayIconEvent::DoubleClick {
+                    button: tray_icon::MouseButton::Left,
+                    ..
+                } => {
+                    if self.show_settings {
+                        self.show_settings = false;
+                        self.settings.save();
+                    } else {
+                        self.open_settings(false);
+                    }
+                    ctx.request_repaint();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Follow the foreground window (or the active family) and, on a switch,
+    /// ask the poller to refresh that family right away. Detection itself runs
+    /// on the watcher thread (active.rs); this only reads its published answer,
+    /// so the frame never walks the process list.
     fn update_active(&mut self, t: f64) {
-        let target = match self.settings.active_mode {
-            ActiveMode::Pinned => self.settings.family,
-            ActiveMode::Auto => match self.detector.poll(t) {
-                Some(f) if self.settings.enabled(f) => f,
-                _ => self.active,
-            },
+        let active_status = active::published();
+        self.is_ai_active = active_status.is_ai;
+        self.foreground_watched = active_status.foreground_watched;
+
+        let target = match active_status.family {
+            Some(f) if self.settings.enabled(f) => f,
+            _ => self.active,
         };
         if target == self.active {
             return;
         }
         self.active = target;
         self.settings.family = target;
-        self.reset_cache.clear();
         self.shared
             .want
             .store(target.idx() as u8, Ordering::Relaxed);
@@ -501,193 +509,23 @@ impl App {
         }
     }
 
-    /// Take the strip off the screen while none of the enabled tools is even
-    /// running: with nothing spending quota there is nothing to watch.
-    ///
-    /// The window itself stays — the event loop, the tray and the settings
-    /// window all live inside its message pump, and a hidden window gets no
-    /// `WM_PAINT`, so hiding it for real would stop the app dead. Instead it
-    /// paints nothing (the window is transparent, so that leaves nothing to
-    /// see) and drops out of mouse hit-testing, so its rectangle cannot swallow
-    /// clicks meant for whatever is underneath.
-    fn update_visibility(&mut self, ctx: &egui::Context, t: f64) {
-        // While the settings window is open the strip stays up whatever is
-        // running: that is where the user changes the design and the toggle
-        // below, and both would otherwise be invisible.
-        let hide = self.settings.hide_when_idle
-            && !self.show_settings
-            && self.detector.running(t) & self.settings.enabled_mask() == 0;
-        if hide == self.idle_hidden {
-            return;
-        }
-        self.idle_hidden = hide;
-        ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(hide));
-    }
 
-    fn draw_strip(&mut self, ui: &mut egui::Ui, anim_t: f64, animate: bool) {
-        let m = self.settings.strip_size.metrics();
-        let op = self.settings.opacity;
-        let full = ui.max_rect();
-        let painter = ui.painter().clone();
-
-        // Translucent rounded background (no stroke — a coloured outline reads as
-        // a stray fringe on the transparent window corners).
-        painter.rect_filled(
-            full,
-            egui::Rounding::same(m.round),
-            Color32::from_rgba_unmultiplied(22, 24, 30, (op * 235.0) as u8),
-        );
-
-        let pal = Palette::new(op);
-        let (text_a, dim) = (pal.text_a, pal.dim);
-
-        let left = full.left() + m.pad_x;
-        let right = full.right() - m.pad_x;
-        let mut y = full.top() + m.pad_top;
-
-        let now = Utc::now();
-        let ActiveState {
-            online,
-            stale,
-            ever,
-            last,
-            error: err,
-        } = self.active_state();
-        // Both states draw real numbers; only the status word differs.
-        let show_values = online || stale;
-
-        // Header: environment/plan (left) + online/offline status (right).
-        let header = match self.settings.header_mode {
-            HeaderMode::Hidden => String::new(),
-            HeaderMode::FamilyOnly => self.active.name().to_string(),
-            HeaderMode::Full => last
-                .as_ref()
-                .map(|s| s.plan.clone())
-                .unwrap_or_else(|| self.active.name().to_string()),
-        };
-        let (status, status_col, dot) = if !ever && !online {
-            ("загрузка…", dim, false)
-        } else if online {
-            (
-                "онлайн",
-                Color32::from_rgba_unmultiplied(120, 205, 150, text_a),
-                true,
-            )
-        } else if stale {
-            (
-                "подключение",
-                Color32::from_rgba_unmultiplied(214, 200, 110, text_a),
-                true,
-            )
-        } else {
-            (
-                "оффлайн",
-                Color32::from_rgba_unmultiplied(232, 150, 80, text_a),
-                true,
-            )
-        };
-        let status_rect = painter.text(
-            Pos2::new(right, y),
-            Align2::RIGHT_TOP,
-            status,
-            FontId::proportional(m.status_font),
-            status_col,
-        );
-        // The header goes on after the status word, clipped to the room left of
-        // it: on the narrow designs a long plan name would otherwise run into it.
-        if !header.is_empty() {
-            let room = Rect::from_min_max(
-                Pos2::new(left, y - 2.0),
-                Pos2::new(status_rect.left() - 12.0, y + m.header_h),
-            );
-            painter.with_clip_rect(room).text(
-                Pos2::new(left, y),
-                Align2::LEFT_TOP,
-                header,
-                FontId::proportional(m.header_font),
-                pal.strong,
-            );
-        }
-        if dot {
-            // While throttled the dot breathes, so "подключение" reads as
-            // something still trying rather than something stuck.
-            let col = if stale {
-                let pulse = 0.45 + 0.55 * (0.5 + 0.5 * (anim_t * 2.2).sin() as f32);
-                status_col.gamma_multiply(pulse)
-            } else {
-                status_col
-            };
-            painter.circle_filled(
-                Pos2::new(status_rect.left() - 6.0, status_rect.center().y),
-                m.dot_r,
-                col,
-            );
-        }
-        y += m.header_h;
-
-        if let Some(s) = &last {
-            // Reset-time strings change at most once a second — cache them so
-            // we don't reformat on every animation frame.
-            let sec = now.timestamp();
-            if self.reset_cache_sec != sec || self.reset_cache.len() != s.limits.len() {
-                self.reset_cache = s
-                    .limits
-                    .iter()
-                    .map(|l| l.window.map(|w| fmt_reset(w.resets_at, now)))
-                    .collect();
-                self.reset_cache_sec = sec;
-            }
-            for (i, lim) in s.limits.iter().enumerate() {
-                let reset = self.reset_cache[i].as_ref();
-                draw_limit(
-                    &painter,
-                    lim,
-                    reset,
-                    left,
-                    right,
-                    y,
-                    now,
-                    &m,
-                    self.title_w,
-                    &pal,
-                    show_values,
-                    animate,
-                    anim_t,
-                    i,
-                );
-                y += m.row_h;
-            }
-        } else if !online && ever {
-            painter.text(
-                Pos2::new(left, y),
-                Align2::LEFT_TOP,
-                "нет данных",
-                FontId::proportional(m.reset_font),
-                dim,
-            );
-        } else if let Some(e) = &err {
-            // Never got data and failing — surface the reason.
-            let room = Rect::from_min_max(Pos2::new(left, y), Pos2::new(right, full.bottom()));
-            painter.with_clip_rect(room).text(
-                Pos2::new(left, y),
-                Align2::LEFT_TOP,
-                format!("ошибка: {e}"),
-                FontId::proportional(m.reset_font),
-                Color32::from_rgba_unmultiplied(232, 150, 80, text_a),
-            );
-        }
-    }
 
     /// Announce a pending update on the tray icon, where it can be seen without
     /// opening anything.
     fn sync_tooltip(&mut self) {
+        let lang = self.settings.language;
+        let name = lang.text("Токпаёк", "Tokpaek");
         let want = match &self.shared.update.lock().unwrap().available {
-            Some(u) => format!(
-                "Quotty {} — доступно обновление {}",
-                update::current(),
-                u.version
-            ),
-            None => format!("Quotty {}", update::current()),
+            Some(u) => match lang {
+                crate::i18n::Language::Russian => {
+                    format!("{name} {} — доступно обновление {}", update::current(), u.version)
+                }
+                crate::i18n::Language::English => {
+                    format!("{name} {} — update {} available", update::current(), u.version)
+                }
+            },
+            None => format!("{name} {}", update::current()),
         };
         if want != self.tooltip {
             if let Some(t) = &self.tray {
@@ -697,53 +535,58 @@ impl App {
         }
     }
 
-    /// (online, ever, snapshot, error) of the family on screen.
-    fn active_state(&self) -> ActiveState {
+    /// (online, stale, snapshot) of the family on screen.
+    fn active_state(&self) -> crate::gauge::ActiveState {
         let st = self.shared.states.lock().unwrap();
         let s = &st[self.active.idx()];
         // Guard against a stale slot: only draw a snapshot that says it belongs
         // to the family we're showing.
         let last = s.last.clone().filter(|snap| snap.family == self.active);
-        ActiveState {
+        crate::gauge::ActiveState {
             // Throttled with data in hand: keep showing it rather than dashes.
             stale: !s.online && s.rate_limited && last.is_some(),
             online: s.online,
-            ever: s.ever,
             last,
-            error: s.error.clone(),
         }
     }
 }
 
 /// Background poller: keeps every enabled family fresh, each on its own
 /// schedule, so one dead source (an IDE that isn't running) can't drag the
-/// others into a fast retry loop.
+/// others into a fast retry loop. The scheduling policy itself lives in
+/// `scheduler::Scheduler` (pure, tested); this loop is just its executor:
+/// read the control words, ask what is due, fetch through the adapter, report.
 fn spawn_poller(shared: Arc<Shared>, ctx: egui::Context) {
+    spawn_poller_with(shared, ctx, providers::fetch);
+}
+
+fn spawn_poller_with(shared: Arc<Shared>, ctx: egui::Context, fetch: crate::scheduler::FetchFn) {
     std::thread::spawn(move || {
-        let now = std::time::Instant::now();
-        let mut due = [now; Family::ALL.len()];
-        let mut backoff = [5u64; Family::ALL.len()];
+        use crate::scheduler::{RetryPolicy, Scheduler};
+        let start = std::time::Instant::now();
+        let now_ms = || start.elapsed().as_millis() as u64;
+        let mut sched = Scheduler::new(now_ms());
+        let mut retry = RetryPolicy::new();
         loop {
             let force = shared.refresh.swap(false, Ordering::Relaxed);
-            let want = shared.want.swap(NO_FAMILY, Ordering::Relaxed);
+            let want = shared.want.swap(crate::scheduler::NO_FAMILY, Ordering::Relaxed);
             let mask = shared.enabled.load(Ordering::Relaxed);
             let interval = shared.interval.load(Ordering::Relaxed).max(5);
             let mut changed = false;
 
-            for family in Family::ALL {
-                let i = family.idx();
-                if mask & (1 << i) == 0 {
+            for family in sched.due_families(now_ms(), force, want, mask) {
+                // A server-driven cooldown outranks our own schedule: ask
+                // nothing until it passes; the last numbers stay on screen.
+                if let Some(until) = retry.cooldown_end_ms(family, now_ms()) {
+                    sched.defer_until(family, until);
                     continue;
                 }
-                if !(force || want == i as u8 || std::time::Instant::now() >= due[i]) {
-                    continue;
-                }
-
-                let result = providers::fetch(family);
+                let result = fetch(family);
                 let ok = result.is_ok();
+                retry.on_result(family, &result, now_ms());
                 {
                     let mut st = shared.states.lock().unwrap();
-                    let s = &mut st[i];
+                    let s = &mut st[family.idx()];
                     match result {
                         Ok(snap) => {
                             s.last = Some(snap);
@@ -755,29 +598,46 @@ fn spawn_poller(shared: Arc<Shared>, ctx: egui::Context) {
                         Err(e) => {
                             s.online = false;
                             s.rate_limited = e.rate_limited;
-                            s.error = Some(e.msg);
+                            s.error = Some(match e.rate_limited {
+                                // Say how long the pause is, now that one
+                                // module owns the answer.
+                                true => {
+                                    let mins = retry
+                                        .cooldown_left_secs(family, now_ms())
+                                        .map(|secs| (secs / 60) + 1)
+                                        .unwrap_or(1);
+                                    format!("лимит запросов, пауза {mins} мин")
+                                }
+                                false => e.msg,
+                            });
                         }
                     }
                 }
                 changed = true;
-                backoff[i] = if ok { 5 } else { (backoff[i] * 2).min(120) };
-                let wait = if ok { interval } else { backoff[i] };
-                due[i] = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+                sched.report(family, ok, now_ms(), interval);
+                // The cooldown outranks the failure ladder: defer *after*
+                // report so the longer of the two waits wins.
+                if let Some(until) = retry.cooldown_end_ms(family, now_ms()) {
+                    sched.defer_until(family, until);
+                }
             }
 
             if changed {
                 ctx.request_repaint();
             }
-            providers::flush_log();
+            crate::diaglog::flush_log();
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
     });
 }
 
-/// Checks GitHub for a newer release every 8 hours (and on demand). Failures
-/// are kept quiet — an offline machine shouldn't produce noise in the UI.
+/// Checks GitHub for a newer release on demand (when shared.update_now is set).
 fn spawn_update_checker(shared: Arc<Shared>, ctx: egui::Context) {
     std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if !shared.update_now.swap(false, Ordering::Relaxed) {
+            continue;
+        }
         let result = update::check();
         {
             let mut st = shared.update.lock().unwrap();
@@ -791,397 +651,9 @@ fn spawn_update_checker(shared: Arc<Shared>, ctx: egui::Context) {
             }
         }
         ctx.request_repaint();
-
-        // Wake once a second so "проверить сейчас" doesn't wait eight hours.
-        for _ in 0..update::CHECK_EVERY_SECS {
-            if shared.update_now.swap(false, Ordering::Relaxed) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_limit(
-    painter: &egui::Painter,
-    lim: &providers::Limit,
-    reset: Option<&(String, String, String)>,
-    left: f32,
-    right: f32,
-    y: f32,
-    now: DateTime<Utc>,
-    m: &Metrics,
-    // Inline designs: width of the title column, measured from the titles on
-    // screen so the bar starts right after the widest of them.
-    title_w: f32,
-    pal: &Palette,
-    show_values: bool,
-    animate: bool,
-    anim_t: f64,
-    idx: usize,
-) {
-    let (op, text_a) = (pal.op, pal.text_a);
-    {
-        // No window at all (the service has not opened one) → no clock: no time
-        // marker, no pace colours, no bubbles. A window whose start we could not
-        // place stands at its very beginning instead (D10, `marker_frac`).
-        let time_frac = lim.window.map(|w| w.marker_frac(now));
-        let use_frac = (lim.used_percent / 100.0).clamp(0.0, 1.0);
-        // Quota fully gone (100%) → whole bar orange. Spending faster than time
-        // (but < 100%) → "overspend": freeze bubbles, paint the part past the
-        // time marker dim-yellow.
-        // A window can run out between two polls: what we hold is still the
-        // last truth about it, and the next poll (a minute away) brings the new
-        // one. Keep showing it for a grace period; only a long silence — a
-        // throttle that outlives the window — makes the number meaningless.
-        let past_reset = lim.window.map(|w| now - w.resets_at);
-        let show = show_values && past_reset.map_or(true, |d| d < RESET_GRACE);
-        let exhausted = lim.used_percent >= LIMIT_PCT;
-        let overspend = show && !exhausted && time_frac.is_some_and(|t| use_frac > t + 0.02);
-
-        let reset_text = match reset {
-            Some(r) => m.reset_style.render(r),
-            None => m.no_window.to_string(),
-        };
-        let pct_text = if show {
-            format!("{:.0}%", lim.used_percent)
-        } else {
-            "—".to_string()
-        };
-        let pct_col = if !show {
-            Color32::from_rgba_unmultiplied(150, 155, 165, text_a)
-        } else {
-            spend_text_color(exhausted, overspend, text_a)
-        };
-
-        // The bar keeps the whole row's width in the stacked design; in the
-        // small ones it gives up a column on each side to the text beside it.
-        let ub_y = y + m.bar_dy;
-        let ub_h = m.bar_h;
-        let (bar_l, bar_r) = if m.inline {
-            (left + title_w, right - m.text_w)
-        } else {
-            (left, right)
-        };
-        let yc = ub_y + ub_h / 2.0;
-
-        if m.inline {
-            // One line: [short title] [bar] [used%] [countdown].
-            if m.titles {
-                let room =
-                    Rect::from_min_max(Pos2::new(left, y), Pos2::new(bar_l - 4.0, y + m.row_h));
-                painter.with_clip_rect(room).text(
-                    Pos2::new(left, yc),
-                    Align2::LEFT_CENTER,
-                    short_title(&lim.title),
-                    FontId::proportional(m.title_font),
-                    pal.strong,
-                );
-            }
-            let reset_rect = painter.text(
-                Pos2::new(right, yc),
-                Align2::RIGHT_CENTER,
-                reset_text,
-                FontId::proportional(m.reset_font),
-                pal.mid,
-            );
-            painter.text(
-                Pos2::new(reset_rect.left() - 6.0, yc),
-                Align2::RIGHT_CENTER,
-                pct_text,
-                FontId::proportional(m.pct_font),
-                pct_col,
-            );
-        } else {
-            // Title line: name (left) + reset time (far right) + used% (left of it).
-            painter.text(
-                Pos2::new(left, y),
-                Align2::LEFT_TOP,
-                &lim.title,
-                FontId::proportional(m.title_font),
-                pal.strong,
-            );
-            let reset_rect = painter.text(
-                Pos2::new(right, y + 0.5),
-                Align2::RIGHT_TOP,
-                reset_text,
-                FontId::proportional(m.reset_font),
-                pal.mid,
-            );
-            painter.text(
-                Pos2::new(reset_rect.left() - 12.0, y),
-                Align2::RIGHT_TOP,
-                pct_text,
-                FontId::proportional(m.pct_font),
-                pct_col,
-            );
-        }
-
-        // Single usage bar.
-        let track_col = Color32::from_rgba_unmultiplied(60, 64, 76, (op * 220.0) as u8);
-        let full_w = bar_r - bar_l;
-        let round = egui::Rounding::same(m.bar_round);
-        let ub_track = Rect::from_min_max(Pos2::new(bar_l, ub_y), Pos2::new(bar_r, ub_y + ub_h));
-        painter.rect_filled(ub_track, round, track_col);
-
-        // Where the time marker sits — nowhere, when the window has no clock.
-        let marker_x = time_frac.map(|t| bar_l + full_w * t);
-
-        let green =
-            Color32::from_rgba_unmultiplied(96, 196, 132, ((0.55 + 0.45 * op) * 255.0) as u8);
-        let yellow =
-            Color32::from_rgba_unmultiplied(208, 192, 96, ((0.55 + 0.45 * op) * 255.0) as u8);
-        let orange =
-            Color32::from_rgba_unmultiplied(214, 150, 74, ((0.55 + 0.45 * op) * 255.0) as u8);
-
-        if show {
-            let use_end = bar_l + full_w * use_frac;
-            if exhausted {
-                // Quota gone → the whole bar is dim-orange.
-                painter.rect_filled(ub_track, round, orange);
-            } else if let Some(mx) = marker_x.filter(|_| overspend) {
-                // Green up to the time marker, dim-yellow for the overspend
-                // (marker → spend edge). No bubbles.
-                painter.rect_filled(
-                    Rect::from_min_max(ub_track.min, Pos2::new(mx, ub_y + ub_h)),
-                    round,
-                    green,
-                );
-                painter.rect_filled(
-                    Rect::from_min_max(Pos2::new(mx, ub_y), Pos2::new(use_end, ub_y + ub_h)),
-                    round,
-                    yellow,
-                );
-            } else {
-                // Under pace: green fill up to spend edge, with bubbles rising
-                // out of the spend edge and dissolving just to its right.
-                let ub_fill_w = (use_end - bar_l).max(if use_frac > 0.0 { 3.0 } else { 0.0 });
-                painter.rect_filled(
-                    Rect::from_min_size(ub_track.min, Vec2::new(ub_fill_w, ub_h)),
-                    round,
-                    green,
-                );
-                if let Some(mx) = marker_x.filter(|mx| animate && *mx > use_end + 4.0) {
-                    draw_bubbles_headroom(
-                        painter,
-                        use_end,
-                        mx,
-                        0.33 * full_w, // dissolve within ≤33% of the bar
-                        ub_y,
-                        ub_h,
-                        anim_t,
-                        (150, 224, 176),
-                        op,
-                        idx as f64 * 1.7,
-                    );
-                }
-            }
-        } else if animate {
-            // Offline: spend unknown → grey "flow" across the whole bar.
-            draw_bubbles(
-                painter,
-                bar_l + 2.0,
-                bar_r - 2.0,
-                yc,
-                anim_t,
-                (170, 175, 186),
-                op,
-                idx as f64 * 0.41,
-                6,
-                0.5,
-            );
-        } else {
-            // Offline, animation off → a static grey placeholder fill.
-            painter.rect_filled(
-                ub_track,
-                round,
-                Color32::from_rgba_unmultiplied(96, 100, 110, (op * 200.0) as u8),
-            );
-        }
-
-        // Vertical marker = current time position, when there is a clock.
-        if let Some(mx) = marker_x {
-            painter.rect_filled(
-                Rect::from_min_max(
-                    Pos2::new(mx - 1.0, ub_y - 2.0),
-                    Pos2::new(mx + 1.0, ub_y + ub_h + 2.0),
-                ),
-                egui::Rounding::same(1.0),
-                Color32::from_rgba_unmultiplied(235, 238, 245, ((0.55 + 0.45 * op) * 255.0) as u8),
-            );
-        }
-    }
-}
-
-/// A row title cut down to the couple of characters the small designs have room
-/// for: "5-hour limit" → "5h", "Weekly · all models" → "7d", "Claude / GPT" →
-/// "Claude". Anything unrecognised keeps its first word.
-fn short_title(title: &str) -> String {
-    let head = title.split('·').next().unwrap_or(title).trim();
-    let low = head.to_ascii_lowercase();
-    if let Some(n) = low.strip_suffix("-hour limit") {
-        return format!("{n}h");
-    }
-    if let Some(n) = low.strip_suffix("-day limit") {
-        return format!("{n}d");
-    }
-    match low.as_str() {
-        "weekly" => "7d".to_string(),
-        "monthly limit" => "30d".to_string(),
-        _ => head.split_whitespace().next().unwrap_or(head).to_string(),
-    }
-}
-
-/// How long a limit keeps showing its last percentage after its window was due
-/// to reset. Longer than any poll interval that still refreshes promptly, short
-/// enough that a throttled source cannot pass off yesterday's number as today's.
-const RESET_GRACE: Duration = Duration::minutes(10);
-
-/// Percent at/above which a limit is considered "reached" → dim-orange.
-const LIMIT_PCT: f32 = 100.0;
-
-/// Usage-% text colour: green (on pace), yellow (overspending vs. time), orange
-/// (quota exhausted) — same hues as the bar fill.
-fn spend_text_color(exhausted: bool, overspend: bool, a: u8) -> Color32 {
-    if exhausted {
-        Color32::from_rgba_unmultiplied(232, 150, 80, a)
-    } else if overspend {
-        Color32::from_rgba_unmultiplied(214, 200, 110, a)
-    } else {
-        Color32::from_rgba_unmultiplied(120, 205, 150, a)
-    }
-}
-
-/// Deterministic pseudo-random in 0..1 from two inputs (no RNG → resume-safe).
-fn pseudo(a: f64, b: f64) -> f64 {
-    ((a * 12.9898 + b * 78.233).sin() * 43758.5453)
-        .fract()
-        .abs()
-}
-
-/// Headroom bubbles: emitted from the spend edge at varying heights, drifting a
-/// short way right and dissolving near the left (never reaching the marker).
-#[allow(clippy::too_many_arguments)]
-fn draw_bubbles_headroom(
-    painter: &egui::Painter,
-    x_start: f32,
-    marker_x: f32,
-    max_reach: f32,
-    ub_top: f32,
-    ub_h: f32,
-    t: f64,
-    rgb: (u8, u8, u8),
-    op: f32,
-    seed: f64,
-) {
-    // Dissolve within min(gap-to-marker, max_reach): if the time marker is close
-    // to the spend edge, bubbles dissolve near it; otherwise cap at max_reach.
-    let reach = (marker_x - x_start).min(max_reach).max(6.0);
-
-    // Two lanes (upper/lower) so bubbles travel in pairs at different heights,
-    // phase-offset so they sit at different x too and never overlap.
-    let lanes = [0.30f32, 0.70f32];
-    let per_lane = 2; // two staggered bubbles per lane → continuous stream
-    let speed = 0.7;
-    for (li, lane_y) in lanes.iter().enumerate() {
-        for j in 0..per_lane {
-            let ph = t * speed
-                + seed
-                + li as f64 * 0.37 // desync the two lanes in x
-                + j as f64 / per_lane as f64; // stagger within a lane
-            let p = ph.rem_euclid(1.0) as f32;
-            let cycle = ph.floor();
-            // Fade in fast, dissolve out by ~0.75 of the (short) travel.
-            let fade = ((p * 5.0).min(1.0) * (1.0 - (p / 0.75).min(1.0))).clamp(0.0, 1.0);
-            // Small per-cycle jitter around the lane height (kept within the lane
-            // band so the two lanes can't collide).
-            let jit = (pseudo(li as f64 * 3.0 + j as f64, cycle) as f32 - 0.5) * 0.12;
-            let x = x_start + reach * p;
-            let y = ub_top + ub_h * (lane_y + jit) - p * 1.5;
-            let a = (fade * 205.0 * (0.4 + 0.6 * op)) as u8;
-            let r = 0.9 + 0.9 * (1.0 - p);
-            painter.circle_filled(
-                Pos2::new(x, y),
-                r,
-                Color32::from_rgba_unmultiplied(rgb.0, rgb.1, rgb.2, a),
-            );
-        }
-    }
-}
-
-/// Lightweight procedural bubbles moving left→right, purely a function of time
-/// (no per-bubble state → cheap and resume-safe). `seed` desyncs rows.
-#[allow(clippy::too_many_arguments)]
-fn draw_bubbles(
-    painter: &egui::Painter,
-    x0: f32,
-    x1: f32,
-    yc: f32,
-    t: f64,
-    rgb: (u8, u8, u8),
-    op: f32,
-    seed: f64,
-    n: usize,
-    speed: f64,
-) {
-    let w = x1 - x0;
-    if w < 4.0 {
-        return;
-    }
-    for i in 0..n {
-        let ph = t * speed + seed + i as f64 / n as f64;
-        let p = ph.rem_euclid(1.0) as f32;
-        let x = x0 + w * p;
-        // Fade in on the left, out on the right.
-        let fade = (p * 3.0).min((1.0 - p) * 2.0).clamp(0.0, 1.0);
-        let bob = ((ph * 2.0).sin() as f32) * 1.1;
-        let a = (fade * 190.0 * (0.4 + 0.6 * op)) as u8;
-        let r = 1.3 + 1.0 * (1.0 - p);
-        painter.circle_filled(
-            Pos2::new(x, yc + bob),
-            r,
-            Color32::from_rgba_unmultiplied(rgb.0, rgb.1, rgb.2, a),
-        );
-    }
-}
-
-/// The three ways one reset time gets written, longest first: the clock time,
-/// the countdown, and the countdown's leading unit alone (all a small design
-/// has room for).
-fn fmt_reset(reset: DateTime<Utc>, now: DateTime<Utc>) -> (String, String, String) {
-    let local = reset.with_timezone(&Local);
-    let rem = reset - now;
-    let abs = if rem > Duration::hours(24) {
-        local.format("%a %H:%M").to_string()
-    } else {
-        local.format("%H:%M").to_string()
-    };
-    let mins = rem.num_minutes().max(0);
-    let (rel, tiny) = if mins >= 1440 {
-        (
-            format!("{}d {}h", mins / 1440, (mins % 1440) / 60),
-            format!("{}d", mins / 1440),
-        )
-    } else if mins >= 60 {
-        (
-            format!("{}h {}m", mins / 60, mins % 60),
-            format!("{}h", mins / 60),
-        )
-    } else if rem > Duration::zero() {
-        // "0m" read as "already reset" while the quota was still counting.
-        let s = if mins == 0 {
-            "<1m".to_string()
-        } else {
-            format!("{mins}m")
-        };
-        (s.clone(), s)
-    } else {
-        // The clock ran out; the next poll brings the new window.
-        ("обновление…".to_string(), "…".to_string())
-    };
-    (abs, rel, tiny)
-}
 
 impl eframe::App for App {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -1190,96 +662,132 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         LAST_PAINT_MS.store(uptime_ms(), Ordering::Relaxed);
+        // Land any settings write whose throttle has elapsed (see config.rs:
+        // save() only buffers while writes are throttled).
+        Settings::flush_due();
         if self.hwnd.is_none() {
             self.hwnd = native_hwnd(frame);
+            if let Some(h) = self.hwnd {
+                NATIVE_HWND.store(h, Ordering::Relaxed);
+                #[cfg(windows)]
+                if !SUBCLASSED.swap(true, Ordering::Relaxed) {
+                    use windows::core::w;
+                    use windows::Win32::Foundation::HWND;
+                    use windows::Win32::UI::Shell::SetWindowSubclass;
+                    use windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW;
+                    let msg = unsafe { RegisterWindowMessageW(w!("Tokpaek_ActivateInstance")) };
+                    ACTIVATE_MSG.store(msg, Ordering::Relaxed);
+                    unsafe {
+                        let _ = SetWindowSubclass(
+                            HWND(h as *mut _),
+                            Some(instance_subclass_proc),
+                            1001,
+                            0,
+                        );
+                    }
+                }
+            }
         }
+
+        #[cfg(windows)]
+        if INSTANCE_ACTIVATED.swap(false, Ordering::Relaxed) {
+            // Facts only — the verdict executor below performs the transition
+            // (passthrough, repaint, z-band).
+            self.manual_hidden = false;
+            self.manual_unhide_until = f64::MAX;
+            self.open_settings(false);
+            ctx.request_repaint();
+        }
+
         self.handle_tray_events(ctx);
 
         let anim_t = ctx.input(|i| i.time);
         self.update_active(anim_t);
-        self.update_visibility(ctx, anim_t);
 
-        // Snapshot animation-relevant state under one lock.
-        let animate_on = self.settings.animate;
-        let (n_limits, animating, titles) = {
-            let st = self.shared.states.lock().unwrap();
-            let s = &st[self.active.idx()];
-            let n = s.last.as_ref().map(|s| s.limits.len().max(1)).unwrap_or(2);
-            let titles: Vec<String> = s
-                .last
-                .as_ref()
-                .map(|s| s.limits.iter().map(|l| short_title(&l.title)).collect())
-                .unwrap_or_default();
-            // Animate (when enabled) whenever offline, or online with a gap.
-            let stale = !s.online && s.rate_limited && s.last.is_some();
-            let anim = if stale {
-                true
-            } else if !animate_on {
-                false
-            } else if !s.online {
-                true
-            } else if let Some(snap) = &s.last {
-                let now = Utc::now();
-                snap.limits.iter().any(|l| {
-                    // Same clock as `draw_limit`: an unplaceable start reads as
-                    // "at the beginning", which is never ahead of the spend.
-                    let Some(time_frac) = l.window.map(|w| w.marker_frac(now)) else {
-                        return false;
-                    };
-                    let use_frac = (l.used_percent / 100.0).clamp(0.0, 1.0);
-                    time_frac > use_frac + 0.02
-                })
-            } else {
-                false
-            };
-            (n, anim, titles)
-        };
+        // One verdict for the whole window (see frame_policy::decide):
+        // visible? click-through? which z-band? how often to repaint? This
+        // loop is only its executor — every toggle site (tray, menus,
+        // settings, activation) changes facts, never the window directly.
+        let verdict = crate::frame_policy::decide(&crate::frame_policy::WindowFacts {
+            manual_hidden: self.manual_hidden,
+            smart_focus: self.settings.smart_focus,
+            always_on_top: self.settings.always_on_top,
+            watched_app_open: self.is_ai_active,
+            foreground_watched: self.foreground_watched,
+            settings_open: self.show_settings,
+            interacting: self.dragging,
+            time: anim_t,
+            launch_grace_secs: 15.0,
+            manual_unhide_until: self.manual_unhide_until,
+        });
 
-        // Fit the window to the design and to the number of limits — which
-        // changes when the active family does (Claude has two windows,
-        // Antigravity three). On the inline designs the width follows the
-        // titles too: "5h"/"7d" needs a far narrower column than "Gemini", and
-        // the window should not carry that gap around for nothing.
-        let m = self.settings.strip_size.metrics();
-        self.title_w = if m.inline && m.titles {
-            let font = egui::FontId::proportional(m.title_font);
-            let widest = ctx.fonts(|f| {
-                titles
-                    .iter()
-                    .map(|t| {
-                        f.layout_no_wrap(t.clone(), font.clone(), Color32::WHITE)
-                            .size()
-                            .x
-                    })
-                    .fold(0.0f32, f32::max)
-            });
-            // Before the first snapshot there is nothing to measure; a sane
-            // guess keeps the window from jumping much when data lands.
-            if widest > 0.0 {
-                widest + 6.0
-            } else {
-                24.0
+        if verdict.visible != !self.idle_hidden {
+            self.idle_hidden = !verdict.visible;
+            ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(verdict.passthrough));
+            ctx.request_repaint();
+            if !verdict.visible {
+                // Hiding must repaint *now*: with click-through on but the
+                // last painted frame still on screen, the widget looked
+                // present yet inert until some unrelated wake-up cleared it.
+                #[cfg(windows)]
+                if let Some(h) = self.hwnd {
+                    unsafe {
+                        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
+                            windows::Win32::Foundation::HWND(h as *mut _),
+                            None,
+                            false,
+                        );
+                    }
+                }
             }
-        } else {
-            0.0
-        };
-        let want = Vec2::new(
-            m.width(self.title_w),
-            m.pad_top + m.header_h + n_limits as f32 * m.row_h + m.pad_bottom,
-        );
+        }
+
+        // The widget resizes by dragging its edges like a normal window:
+        // adopt what the user dragged into the settings (pure decision in
+        // frame_policy::adopt_resize), then re-assert the square below.
+        let inner_rect = ctx.input(|i| i.viewport().inner_rect);
+        let viewport_w = inner_rect.map(|r| r.width());
+        if let Some(size) = crate::frame_policy::adopt_resize(viewport_w, self.applied_size.x) {
+            self.settings.circle_size = size;
+            self.settings.save();
+        }
+
+        let want = Vec2::splat(self.settings.circle_size as f32);
         if (want - self.applied_size).length() > 0.5 {
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(want));
             self.applied_size = want;
         }
+        // The OS resize loop drags width and height independently, and
+        // winit's InnerSize can round differently — pin the square in
+        // physical pixels once per frame, whichever path changed the size.
+        // Z-order is *not* this call's business: the verdict executor below
+        // owns the band.
+        #[cfg(windows)]
+        if let Some(h) = self.hwnd {
+            windowing::place_square(h, self.settings.circle_size as f32 * ctx.pixels_per_point());
+        }
 
-        // Re-assert always-on-top periodically: the taskbar is topmost too and
-        // whichever topmost window was raised last wins. NOTE: going through
-        // egui/winit (`ViewportCommand::WindowLevel`) does NOT work — winit
-        // diffs window flags and returns early when the level is unchanged, so
-        // no SetWindowPos is issued. We must call Win32 directly.
-        if !self.idle_hidden && anim_t - self.last_topmost >= 0.7 {
+        if let Some(tray) = &self.tray {
+            // The one place the tray checkmarks learn the settings — every
+            // toggle site (settings window, widget click, context menu, tray
+            // menu) only changes `settings`, this frame applies them.
+            tray.set_topmost_checked(self.settings.always_on_top);
+        }
+
+        // Z-order comes from the verdict — one decision, one executor.
+        // NOTE: egui/winit `ViewportCommand::WindowLevel` does NOT work here —
+        // winit diffs window flags and returns early when unchanged, so no
+        // SetWindowPos is issued. Win32 directly.
+        // Re-asserted every frame while Smart Focus is on (the WinEvent hook
+        // wakes us the moment the foreground changes), otherwise on a 0.7 s
+        // cadence because the taskbar shares the topmost band.
+        let z_due = self.settings.smart_focus || anim_t - self.last_topmost >= 0.7;
+        if !self.idle_hidden && z_due {
             if let Some(h) = self.hwnd {
-                force_topmost(h);
+                match verdict.band {
+                    crate::frame_policy::ZBand::Topmost => windowing::set_topmost(h),
+                    crate::frame_policy::ZBand::Normal => windowing::drop_topmost(h),
+                }
             }
             self.last_topmost = anim_t;
         }
@@ -1293,43 +801,109 @@ impl eframe::App for App {
                     return;
                 }
                 let full = ui.max_rect();
+                // Mouse-resize like a normal window: the outer band of the
+                // square reacts to the pointer (resize cursors) and a drag
+                // started there hands the window to the OS resize loop. The
+                // rest of the square stays the drag/click area.
+                //
+                // The zone for a *started* drag comes from where the button
+                // went down (`press_origin`, fixed at the press), not from any
+                // live pointer position: `drag_started_by` fires a few pixels
+                // into the gesture, and by then both hover_pos and
+                // interact_pointer_pos have often left the edge band — which
+                // is what made edge drags move the window instead.
+                let edge_at = |pos: Pos2| {
+                    crate::frame_policy::resize_edge(
+                        (full.width(), full.height()),
+                        (pos.x - full.min.x, pos.y - full.min.y),
+                    )
+                };
+                if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                    if let Some(zone) = edge_at(pos) {
+                        ui.ctx().set_cursor_icon(zone.cursor());
+                    }
+                }
                 let resp = ui.interact(full, ui.id().with("strip-drag"), Sense::click_and_drag());
                 if resp.drag_started_by(PointerButton::Primary) {
-                    ctx.send_viewport_cmd(ViewportCommand::StartDrag);
-                    self.dragging = true;
+                    let press_zone = ctx
+                        .input(|i| i.pointer.press_origin())
+                        .and_then(edge_at);
+                    match press_zone {
+                        Some(zone) => {
+                            ctx.send_viewport_cmd(ViewportCommand::BeginResize(zone.direction()));
+                        }
+                        None => {
+                            ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+                            self.dragging = true;
+                        }
+                    }
+                }
+                if resp.clicked_by(PointerButton::Primary) {
+                    // The seven-day timer only switches while the seven-day
+                    // arc exists (the same rule that grays the menu item out).
+                    if !self.settings.circle_show_claude_gpt {
+                        self.settings.circle_show_weekly_reset =
+                            !self.settings.circle_show_weekly_reset;
+                        self.settings.save();
+                        ctx.request_repaint();
+                    }
                 }
                 if resp.clicked_by(PointerButton::Secondary) {
-                    self.open_settings(true);
+                    #[cfg(windows)]
+                    {
+                        if let Some(h) = self.hwnd {
+                            let state = ContextMenuState {
+                                always_on_top: self.settings.always_on_top,
+                                lang: self.settings.language,
+                            };
+                            if let Some(action) = show_context_menu(h, &state) {
+                                self.apply_menu_action(action, ctx);
+                            }
+                        } else {
+                            self.open_settings(true);
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        self.open_settings(true);
+                    }
                 }
-                self.draw_strip(ui, anim_t, animate_on);
+                crate::gauge::draw(ui, &self.settings, self.active_state());
             });
 
         // Persist the window position when the user finishes moving it — and
         // only then. Saving on any release once let the placement the shell
         // imposes on a shortcut launch overwrite the user's own position.
+        //
+        // Everything here is *physical* pixels via Win32: egui's logical
+        // coordinates are relative to one screen and mixing them with the
+        // work area of another (different DPI) sent the window off-screen
+        // when it was dropped on a second monitor.
         if self.dragging && ctx.input(|i| i.pointer.any_released()) {
             self.dragging = false;
-            if let Some(r) = ctx.input(|i| i.viewport().outer_rect) {
-                let p = (r.min.x, r.min.y);
-                if self.settings.pos != Some(p) {
-                    self.settings.pos = Some(p);
-                    self.settings.save();
+            #[cfg(windows)]
+            if let Some(h) = self.hwnd {
+                if let Some(pos) = windowing::snap(h) {
+                    // Stored in logical points: what the startup viewport
+                    // builder consumes.
+                    let ppp = ctx.pixels_per_point();
+                    let p = (pos.0 / ppp, pos.1 / ppp);
+                    if self.settings.pos != Some(p) {
+                        self.settings.pos = Some(p);
+                        self.settings.save();
+                    }
                 }
             }
+            #[cfg(not(windows))]
+            let _ = &ctx;
         }
 
         self.sync_tooltip();
         self.render_settings(ctx);
 
-        // Animate at ~20 FPS only when there's motion to show; otherwise idle at
-        // 2 FPS to keep timers/labels flowing without burning CPU. Tray menu
-        // events wake the loop on their own (see the handler in `new`), and the
-        // Win32 timer covers the stretches where winit's own wake-up can't run.
-        let period = if animating && !self.idle_hidden {
-            50
-        } else {
-            500
-        };
+        // Energy efficiency / 0% CPU: the period comes from the same verdict;
+        // input, window changes and network updates wake egui on-demand.
+        let period = verdict.repaint_ms;
         if let Some(h) = self.hwnd {
             if self.timer_period != period {
                 arm_repaint_timer(h, period);
@@ -1340,48 +914,3 @@ impl eframe::App for App {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{fmt_reset, short_title};
-    use chrono::{Duration, Utc};
-
-    /// The window is still counting until its reset actually passes: rounding
-    /// the last seconds down to "0m" read as "already reset".
-    #[test]
-    fn the_last_minute_is_not_zero_minutes() {
-        let now = Utc::now();
-        let rel = |secs: i64| fmt_reset(now + Duration::seconds(secs), now).1;
-
-        assert_eq!(rel(40), "<1m", "under a minute still has time left");
-        assert_eq!(rel(95), "1m");
-        assert_eq!(rel(2 * 3600 + 5 * 60), "2h 5m");
-        assert_eq!(rel(25 * 3600), "1d 1h");
-        assert_eq!(rel(0), "обновление…", "the clock ran out, wait for a poll");
-        assert_eq!(rel(-30), "обновление…");
-    }
-
-    /// The small designs have room for the leading unit and nothing else, so
-    /// the countdown must survive being cut down to it.
-    #[test]
-    fn the_tiny_countdown_keeps_the_leading_unit() {
-        let now = Utc::now();
-        let tiny = |secs: i64| fmt_reset(now + Duration::seconds(secs), now).2;
-
-        assert_eq!(tiny(40), "<1m");
-        assert_eq!(tiny(95), "1m");
-        assert_eq!(tiny(2 * 3600 + 5 * 60), "2h");
-        assert_eq!(tiny(25 * 3600), "1d");
-        assert_eq!(tiny(-30), "…", "no room for a word on a nano row");
-    }
-
-    #[test]
-    fn titles_shrink_to_a_couple_of_characters() {
-        assert_eq!(short_title("5-hour limit"), "5h");
-        assert_eq!(short_title("Weekly · all models"), "7d");
-        assert_eq!(short_title("Monthly limit"), "30d");
-        assert_eq!(short_title("7-day limit"), "7d");
-        // Antigravity's two rows keep the word that tells them apart.
-        assert_eq!(short_title("Gemini"), "Gemini");
-        assert_eq!(short_title("Claude / GPT"), "Claude");
-    }
-}

@@ -6,7 +6,7 @@
 //! a refresh is picked up. We never write to it — rotating the refresh token
 //! from here would sign the user out of Codex.
 
-use super::{dbg_log, diag, window_title, Family, FetchError, Limit, LimitWindow, Snapshot};
+use crate::diaglog::{dbg_log, diag}; use super::{window_title, Family, FetchError, Limit, LimitKind, LimitPool, LimitWindow, Snapshot};
 use chrono::{DateTime, TimeZone, Utc};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -76,8 +76,6 @@ fn load_auth() -> Result<Auth, String> {
 #[derive(Deserialize)]
 struct UsageResponse {
     #[serde(default)]
-    plan_type: Option<String>,
-    #[serde(default)]
     rate_limit: Option<RateLimit>,
 }
 
@@ -107,7 +105,7 @@ pub fn fetch() -> Result<Snapshot, FetchError> {
 
     let mut req = ureq::get(USAGE_URL)
         .set("Authorization", &format!("Bearer {}", auth.access))
-        .set("User-Agent", "Quotty/0.1")
+        .set("User-Agent", "Tokpaek/0.1")
         .timeout(std::time::Duration::from_secs(20));
     if let Some(acc) = &auth.account_id {
         req = req.set("chatgpt-account-id", acc);
@@ -125,11 +123,18 @@ pub fn fetch() -> Result<Snapshot, FetchError> {
         Err(ureq::Error::Status(401, _)) => {
             return Err("токен Codex устарел — откройте Codex".into())
         }
-        Err(ureq::Error::Status(429, _)) => {
-            diag("codex: status 429 (rate limited)");
+        Err(ureq::Error::Status(429, resp)) => {
+            let retry_after = resp
+                .header("retry-after")
+                .and_then(|v| v.trim().parse::<u64>().ok());
+            diag(&format!("codex: status 429 (rate limited), retry-after {retry_after:?}"));
             // Same reasoning as Claude: the numbers we already have are still
-            // good, the service just refuses to talk right now.
-            return Err(FetchError::rate_limited("лимит запросов OpenAI"));
+            // good, the service just refuses to talk right now. The waiting
+            // decision belongs to the poller's RetryPolicy.
+            return Err(FetchError::rate_limited_for(
+                "лимит запросов OpenAI",
+                retry_after,
+            ));
         }
         Err(ureq::Error::Status(code, _)) => {
             diag(&format!("codex: status {code}"));
@@ -159,7 +164,6 @@ fn build_snapshot(usage: UsageResponse) -> Snapshot {
     }
     Snapshot {
         family: Family::Codex,
-        plan: pretty_plan(usage.plan_type.as_deref()),
         limits,
     }
 }
@@ -179,24 +183,19 @@ fn to_limit(w: Window, now: DateTime<Utc>) -> Option<Limit> {
         .limit_window_seconds
         .map(chrono::Duration::seconds)
         .unwrap_or_else(|| (resets_at - now).max(chrono::Duration::seconds(1)));
+    // A window of roughly a week is the weekly quota; anything shorter is the
+    // rolling session window. The backend names neither, so the span decides.
+    let kind = if span >= chrono::Duration::days(6) {
+        LimitKind::Weekly
+    } else {
+        LimitKind::Session
+    };
     Some(Limit {
         title: window_title(span.num_seconds()),
+        kind,
+        pool: LimitPool::Own,
         used_percent: used,
         window: Some(LimitWindow::ending_at(resets_at, span, now)),
+        weekly: None,
     })
-}
-
-/// `plan_type` from the backend ("free", "plus", "pro", "business", …).
-fn pretty_plan(plan: Option<&str>) -> String {
-    match plan {
-        None | Some("") => "Codex".into(),
-        Some(p) => {
-            let mut c = p.chars();
-            let pretty = match c.next() {
-                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                None => String::new(),
-            };
-            format!("Codex {pretty}")
-        }
-    }
 }

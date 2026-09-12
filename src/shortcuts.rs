@@ -20,11 +20,11 @@ fn startup_dir() -> Option<PathBuf> {
 }
 
 fn startup_lnk() -> Option<PathBuf> {
-    startup_dir().map(|d| d.join("Quotty.lnk"))
+    startup_dir().map(|d| d.join("Tokpaek.lnk"))
 }
 
 fn desktop_lnk() -> Option<PathBuf> {
-    dirs::desktop_dir().map(|d| d.join("Quotty.lnk"))
+    dirs::desktop_dir().map(|d| d.join("Tokpaek.lnk"))
 }
 
 fn make_lnk(target: &PathBuf, dest: &PathBuf) -> Result<(), String> {
@@ -40,18 +40,14 @@ fn make_lnk(target: &PathBuf, dest: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-/// Create a launch shortcut on the Desktop (idempotent).
-pub fn ensure_desktop_shortcut() -> Result<(), String> {
-    let target = exe().ok_or("no exe path")?;
-    let dest = desktop_lnk().ok_or("no desktop dir")?;
-    if dest.exists() {
-        return Ok(());
-    }
-    make_lnk(&target, &dest)
-}
-
-/// Create/overwrite the Desktop shortcut unconditionally.
+/// Create/overwrite the Desktop shortcut unconditionally. Only ever called
+/// from the settings button — the app never creates it on its own.
 pub fn force_desktop_shortcut() -> Result<(), String> {
+    if let Some(old) = dirs::desktop_dir().map(|d| d.join("Quotty.lnk")) {
+        if old.exists() {
+            let _ = std::fs::remove_file(old);
+        }
+    }
     let target = exe().ok_or("no exe path")?;
     let dest = desktop_lnk().ok_or("no desktop dir")?;
     make_lnk(&target, &dest)
@@ -59,9 +55,15 @@ pub fn force_desktop_shortcut() -> Result<(), String> {
 
 pub fn is_autostart_enabled() -> bool {
     startup_lnk().map(|p| p.exists()).unwrap_or(false)
+        || startup_dir().map(|d| d.join("Quotty.lnk").exists()).unwrap_or(false)
 }
 
 pub fn set_autostart(enabled: bool) -> Result<(), String> {
+    if let Some(old) = startup_dir().map(|d| d.join("Quotty.lnk")) {
+        if old.exists() {
+            let _ = std::fs::remove_file(old);
+        }
+    }
     let dest = startup_lnk().ok_or("no startup dir")?;
     if enabled {
         let target = exe().ok_or("no exe path")?;

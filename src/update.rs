@@ -1,19 +1,15 @@
-//! Update check: asks GitHub for the project's latest release tag.
+//! Update check: asks GitHub for the project's latest release tag on demand.
 //!
-//! Read-only and opt-out-free but harmless: one HTTPS GET every 8 hours while
-//! the app is running. Quotty never downloads or installs anything by itself —
+//! Tokpaek never downloads or installs anything by itself —
 //! it only points at the release page.
 
 use serde::Deserialize;
 
-pub const RELEASES_PAGE: &str = "https://github.com/confeden/Quotty/releases/latest";
-const API_URL: &str = "https://api.github.com/repos/confeden/Quotty/releases/latest";
-
-/// How long between automatic checks.
-pub const CHECK_EVERY_SECS: u64 = 8 * 3600;
+pub const RELEASES_PAGE: &str = "https://github.com/Ilardar/Tokpaek/releases/latest";
+const API_URL: &str = "https://api.github.com/repos/Ilardar/Tokpaek/releases/latest";
 
 pub fn current() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    env!("APP_BUILD_VERSION")
 }
 
 #[derive(Clone, Debug)]
@@ -46,7 +42,7 @@ struct Release {
 /// `Ok(None)` = we are up to date (or the repo has no published release yet).
 pub fn check() -> Result<Option<Update>, String> {
     let resp = match ureq::get(API_URL)
-        .set("User-Agent", &format!("Quotty/{}", current()))
+        .set("User-Agent", &format!("Tokpaek/{}", current()))
         .set("Accept", "application/vnd.github+json")
         .timeout(std::time::Duration::from_secs(15))
         .call()
@@ -76,8 +72,8 @@ pub fn check() -> Result<Option<Update>, String> {
     }))
 }
 
-/// Numeric, component-wise comparison of `v1.2.3`-style versions. Anything we
-/// can't parse counts as "not newer", so a stray tag never nags the user.
+/// Comparison of versions. Supports {year}.{day} compilation date format
+/// as well as standard semver. Anything we can't parse counts as "not newer".
 fn is_newer(tag: &str, current: &str) -> bool {
     let parse = |s: &str| -> Vec<u32> {
         s.trim()
@@ -90,6 +86,7 @@ fn is_newer(tag: &str, current: &str) -> bool {
     if new.is_empty() {
         return false;
     }
+    // Component-wise comparison (year then day for 2-component format):
     for i in 0..new.len().max(cur.len()) {
         let a = new.get(i).copied().unwrap_or(0);
         let b = cur.get(i).copied().unwrap_or(0);
@@ -106,9 +103,17 @@ mod tests {
 
     #[test]
     fn compares_versions() {
+        // year.day format
+        assert!(is_newer("v26.253", "26.252"));
+        assert!(is_newer("26.253", "26.252"));
+        assert!(is_newer("27.1", "26.252"));
+        assert!(!is_newer("26.250", "26.252"));
+        assert!(!is_newer("26.252", "26.252"));
+        assert!(!is_newer("25.300", "26.252"));
+        // semver fallback
         assert!(is_newer("v1.1.0", "1.0.0"));
         assert!(is_newer("1.0.1", "1.0.0"));
-        assert!(is_newer("2.0", "1.9.9"));
+        assert!(is_newer("2.0.0", "1.9.9"));
         assert!(!is_newer("v1.0.0", "1.0.0"));
         assert!(!is_newer("0.9.9", "1.0.0"));
         assert!(!is_newer("nightly", "1.0.0"));

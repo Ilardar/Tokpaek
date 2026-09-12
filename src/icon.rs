@@ -1,85 +1,108 @@
-//! Programmatic tray icon: a rounded dark tile with two accent "quota bars",
-//! echoing the strip itself. Returns 32x32 RGBA8.
+//! Programmatic tray icon: two arcs forming a single circular boundary,
+//! each arc having 12 cells colored in traffic-light colors (green, yellow, red).
+//! Returns 32x32 RGBA8.
 
 pub const SIZE: u32 = 32;
 
 pub fn rgba() -> Vec<u8> {
-    let w = SIZE as i32;
-    let h = SIZE as i32;
-    let mut buf = vec![0u8; (w * h * 4) as usize];
+    use std::f32::consts::PI;
 
-    let bg = [26u8, 28, 34, 255];
-    let track = [60u8, 64, 74, 255];
-    let accent = [90u8, 150, 255, 255];
-    let accent2 = [120u8, 200, 160, 255];
+    let w = SIZE as usize;
+    let h = SIZE as usize;
+    let mut buf = vec![0u8; w * h * 4];
 
-    let radius = 6i32;
-    let put = |buf: &mut [u8], x: i32, y: i32, c: [u8; 4]| {
-        if x < 0 || y < 0 || x >= w || y >= h {
-            return;
+    let cx = 16.0_f32;
+    let cy = 16.0_f32;
+    let r_out = 13.5_f32;
+    let r_in = 8.5_f32;
+    let split_half_rad = 6.0_f32.to_radians();
+    let span = PI - 2.0 * split_half_rad;
+    let n_cells = 12.0_f32;
+    let cell_pitch = span / n_cells;
+    let cell_gap = cell_pitch * 0.18;
+
+    let c_bg = [18.0_f32, 20.0, 26.0, 255.0];
+    let c_track = [34.0_f32, 38.0, 48.0, 255.0];
+    let c_green = [16.0_f32, 196.0, 128.0, 255.0];
+    let c_yellow = [250.0_f32, 185.0, 25.0, 255.0];
+    let c_red = [244.0_f32, 63.0, 94.0, 255.0];
+
+    let pad = 1.0_f32;
+    let cx_tile = SIZE as f32 / 2.0;
+    let r_tile = cx_tile - pad;
+
+    let sample = |x: f32, y: f32| -> [f32; 4] {
+        // Circular tile: the backing plate is a disc, not a squircle.
+        let dx_t = x - cx_tile;
+        let dy_t = y - cx_tile;
+        if dx_t * dx_t + dy_t * dy_t > r_tile * r_tile {
+            return [0.0, 0.0, 0.0, 0.0];
         }
-        let i = ((y * w + x) * 4) as usize;
-        buf[i] = c[0];
-        buf[i + 1] = c[1];
-        buf[i + 2] = c[2];
-        buf[i + 3] = c[3];
+
+        let dx = x - cx;
+        let dy = y - cy;
+        let dist = (dx * dx + dy * dy).sqrt();
+        if dist < r_in || dist > r_out {
+            return c_bg;
+        }
+
+        // Within annular ring:
+        // Top arc (dy < 0): angle from 9 o'clock to 3 o'clock
+        // Bottom arc (dy >= 0): angle from 9 o'clock to 3 o'clock
+        let theta = if dy < 0.0 {
+            (-dy).atan2(-dx)
+        } else {
+            dy.atan2(-dx)
+        };
+
+        if theta < split_half_rad || theta > PI - split_half_rad {
+            return c_bg;
+        }
+
+        let arc_t = theta - split_half_rad;
+        let cell_idx = (arc_t / cell_pitch).floor() as usize;
+        if cell_idx >= 12 {
+            return c_bg;
+        }
+
+        let pos_in_cell = arc_t - cell_idx as f32 * cell_pitch;
+        if pos_in_cell > cell_pitch - cell_gap {
+            return c_track;
+        }
+
+        if cell_idx < 4 {
+            c_green
+        } else if cell_idx < 8 {
+            c_yellow
+        } else {
+            c_red
+        }
     };
 
-    // Rounded background tile.
-    for y in 0..h {
-        for x in 0..w {
-            let inside = rounded_inside(x, y, w, h, radius);
-            if inside {
-                put(&mut buf, x, y, bg);
+    // 4x4 supersampling for antialiased subpixels
+    const SS: usize = 4;
+    for py in 0..h {
+        for px in 0..w {
+            let mut acc = [0.0_f32; 4];
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let x = px as f32 + (sx as f32 + 0.5) / SS as f32;
+                    let y = py as f32 + (sy as f32 + 0.5) / SS as f32;
+                    let c = sample(x, y);
+                    for k in 0..4 {
+                        acc[k] += c[k];
+                    }
+                }
             }
-        }
-    }
-
-    // Two bars.
-    let bar_h = 4i32;
-    let left = 6i32;
-    let right = w - 6;
-    for (idx, (fill_frac, col)) in [(0.75f32, accent), (0.4f32, accent2)]
-        .into_iter()
-        .enumerate()
-    {
-        let y0 = 9 + idx as i32 * 9;
-        let fill_x = left + ((right - left) as f32 * fill_frac) as i32;
-        for y in y0..y0 + bar_h {
-            for x in left..right {
-                let c = if x <= fill_x { col } else { track };
-                put(&mut buf, x, y, c);
-            }
+            let idx = (py * w + px) * 4;
+            let count = (SS * SS) as f32;
+            buf[idx] = (acc[0] / count).round() as u8;
+            buf[idx + 1] = (acc[1] / count).round() as u8;
+            buf[idx + 2] = (acc[2] / count).round() as u8;
+            buf[idx + 3] = (acc[3] / count).round() as u8;
         }
     }
 
     buf
 }
 
-fn rounded_inside(x: i32, y: i32, w: i32, h: i32, r: i32) -> bool {
-    let corners = [
-        (r, r),
-        (w - 1 - r, r),
-        (r, h - 1 - r),
-        (w - 1 - r, h - 1 - r),
-    ];
-    let in_x_band = x >= r && x <= w - 1 - r;
-    let in_y_band = y >= r && y <= h - 1 - r;
-    if in_x_band || in_y_band {
-        return true;
-    }
-    // In a corner region: check distance to the matching corner center.
-    let cx = if x < w / 2 {
-        corners[0].0
-    } else {
-        corners[1].0
-    };
-    let cy = if y < h / 2 {
-        corners[0].1
-    } else {
-        corners[2].1
-    };
-    let dx = x - cx;
-    let dy = y - cy;
-    dx * dx + dy * dy <= r * r
-}

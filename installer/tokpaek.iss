@@ -1,13 +1,13 @@
-; Inno Setup script for Quotty. Built by tools\build-installer.ps1, which
-; passes the version from Cargo.toml:
-;   ISCC.exe /DAppVersion=1.0.0 installer\quotty.iss
+; Inno Setup script for Tokpaek. Built by tools\build-installer.ps1, which
+; passes the version:
+;   ISCC.exe /DAppVersion=26.252 installer\tokpaek.iss
 #ifndef AppVersion
   #define AppVersion "1.0.0"
 #endif
-#define AppName "Quotty"
+#define AppName "Tokpaek"
 #define AppPublisher "Brent"
-#define AppURL "https://github.com/confeden/Quotty"
-#define AppExe "quotty.exe"
+#define AppURL "https://github.com/Ilardar/Tokpaek"
+#define AppExe "tokpaek.exe"
 
 [Setup]
 AppId={{7C2F1E64-9A3D-4B58-9C51-0B7E6D2A4F13}
@@ -29,7 +29,7 @@ UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName} {#AppVersion}
 OutputDir=..\dist
 OutputBaseFilename={#AppName}-Setup-{#AppVersion}
-SetupIconFile=..\assets\quotty.ico
+SetupIconFile=..\assets\tokpaek.ico
 WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
@@ -58,23 +58,28 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags
 
 [UninstallRun]
 ; The strip has no taskbar window, so let the uninstaller close it itself.
-Filename: "{sys}\taskkill.exe"; Parameters: "/f /im {#AppExe}"; Flags: runhidden; RunOnceId: "StopQuotty"
+Filename: "{sys}\taskkill.exe"; Parameters: "/f /im {#AppExe}"; Flags: runhidden; RunOnceId: "StopTokpaek"
+Filename: "{sys}\taskkill.exe"; Parameters: "/f /im quotty.exe"; Flags: runhidden; RunOnceId: "StopQuotty"
 
 [UninstallDelete]
 Type: files; Name: "{userstartup}\{#AppName}.lnk"
 Type: files; Name: "{userdesktop}\{#AppName}.lnk"
+Type: files; Name: "{userstartup}\Quotty.lnk"
+Type: files; Name: "{userdesktop}\Quotty.lnk"
 
 [CustomMessages]
-ru.AutoStartTask=Запускать Quotty при входе в Windows
-en.AutoStartTask=Start Quotty when Windows starts
+ru.AutoStartTask=Запускать Токпаёк при входе в Windows
+en.AutoStartTask=Start Tokpaek when Windows starts
 
 [Code]
-// A running copy would keep quotty.exe locked during an upgrade.
+// A running copy would keep the exe locked during an upgrade.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
 begin
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im {#AppExe}', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im quotty.exe', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := '';
 end;
