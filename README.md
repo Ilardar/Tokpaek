@@ -77,4 +77,4 @@ powershell -ExecutionPolicy Bypass -File tools\build-installer.ps1
 
 ---
 
-# Создано на основе форка [Quotty](https://github.com/confeden/Quotty)): спасибо @confeden
+## Создано на основе форка [Quotty](https://github.com/confeden/Quotty)): спасибо @confeden
