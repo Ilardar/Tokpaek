@@ -91,27 +91,6 @@ pub struct ResetParts {
     pub expired: bool,
 }
 
-/// chrono's `%a` is always English; the Russian sentence must not read
-/// "в Wed 22:28".
-fn weekday_short_ru(abs: &str) -> String {
-    let (head, rest) = abs.split_once(' ').unwrap_or(("", abs));
-    let ru = match head {
-        "Mon" => "пн",
-        "Tue" => "вт",
-        "Wed" => "ср",
-        "Thu" => "чт",
-        "Fri" => "пт",
-        "Sat" => "сб",
-        "Sun" => "вс",
-        _ => head,
-    };
-    if head.is_empty() {
-        abs.to_string()
-    } else {
-        format!("{ru} {rest}")
-    }
-}
-
 /// The countdown text without its "Сброс "/"Reset " prefix — the part the
 /// context menu and the hover tooltip re-use verbatim, so nothing ever has to
 /// strip a formatted sentence back apart.
@@ -119,11 +98,7 @@ pub fn reset_body(lang: Language, parts: &ResetParts) -> String {
     if parts.expired {
         return lang.text("обновление…", "updating…").to_string();
     }
-    let abs = match lang {
-        Language::Russian => weekday_short_ru(&parts.abs),
-        Language::English => parts.abs.clone(),
-    };
-    let abs_clean = abs.strip_prefix('0').unwrap_or(&abs);
+    let abs_clean = parts.abs.strip_prefix('0').unwrap_or(&parts.abs);
     match lang {
         Language::Russian => {
             let w = minutes_word_ru(parts.mins);
@@ -716,11 +691,11 @@ fn draw_annular_mesh(
 pub fn fmt_reset(reset: DateTime<Utc>, now: DateTime<Utc>) -> ResetParts {
     let local = reset.with_timezone(&Local);
     let rem = reset - now;
-    let abs = if rem > Duration::hours(24) {
-        local.format("%a %-H:%M").to_string()
-    } else {
-        local.format("%-H:%M").to_string()
-    };
+    // Always the clock time alone: the 5-hour window never crosses into
+    // "another day" territory, and the weekday prefix it used to add past
+    // 24 h (a clock-skew leftover from the strip design) only made the pill
+    // longer and uglier.
+    let abs = local.format("%-H:%M").to_string();
     let mins = rem.num_minutes().max(0);
     let expired = rem <= Duration::zero();
     let (rel, tiny) = if mins >= 1440 {
