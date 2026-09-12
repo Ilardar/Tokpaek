@@ -69,7 +69,7 @@
 cargo build --release
 ```
 
-Инсталлятор (нужен [Inno Setup 6](https://jrsoftware.org/isdl.php)):
+Инсталлятор (нужен [Inno Setup 6](https://jrsoftware.org/isdl.php)
 
 ```
 powershell -ExecutionPolicy Bypass -File tools\build-installer.ps1
