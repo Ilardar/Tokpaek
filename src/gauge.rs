@@ -72,19 +72,12 @@ fn day_of_week_en(weekday: chrono::Weekday) -> &'static str {
     }
 }
 
-/// The three ways one reset time gets written, plus the facts behind them.
-/// Typed on purpose: `expired` used to travel as the literal string
-/// "обновление…" that callers compared against.
+/// One reset time, as the facts behind the sentence. Typed on purpose:
+/// `expired` used to travel as the literal string "обновление…" that callers
+/// compared against.
 pub struct ResetParts {
-    /// The clock time, e.g. "01:16" or "Wed 4:03".
+    /// The clock time, e.g. "01:16".
     pub abs: String,
-    /// The countdown, e.g. "2h 5m". The circle gauge doesn't draw it; kept
-    /// because the tests pin the countdown contract.
-    #[allow(dead_code)]
-    pub rel: String,
-    /// The countdown's leading unit alone; likewise test-only for now.
-    #[allow(dead_code)]
-    pub tiny: String,
     /// Total minutes until reset.
     pub mins: i64,
     /// The clock ran out; the next poll brings the new window.
@@ -698,32 +691,8 @@ pub fn fmt_reset(reset: DateTime<Utc>, now: DateTime<Utc>) -> ResetParts {
     let abs = local.format("%-H:%M").to_string();
     let mins = rem.num_minutes().max(0);
     let expired = rem <= Duration::zero();
-    let (rel, tiny) = if mins >= 1440 {
-        (
-            format!("{}d {}h", mins / 1440, (mins % 1440) / 60),
-            format!("{}d", mins / 1440),
-        )
-    } else if mins >= 60 {
-        (
-            format!("{}h {}m", mins / 60, mins % 60),
-            format!("{}h", mins / 60),
-        )
-    } else if !expired {
-        // "0m" read as "already reset" while the quota was still counting.
-        let s = if mins == 0 {
-            "<1m".to_string()
-        } else {
-            format!("{mins}m")
-        };
-        (s.clone(), s)
-    } else {
-        // The clock ran out; the next poll brings the new window.
-        (String::new(), "…".to_string())
-    };
     ResetParts {
         abs,
-        rel,
-        tiny,
         mins,
         expired,
     }
@@ -797,33 +766,18 @@ mod tests {
         }
     }
 
-    /// The window is still counting until its reset actually passes: rounding
-    /// the last seconds down to "0m" read as "already reset".
+    /// The window is still counting until its reset actually passes: the
+    /// expired flag — not a rounded "0 minutes" — tells the pill to show
+    /// "обновление…".
     #[test]
-    fn the_last_minute_is_not_zero_minutes() {
+    fn the_clock_running_out_sets_expired() {
         let now = Utc::now();
-        let rel = |secs: i64| fmt_reset(now + Duration::seconds(secs), now).rel;
-
-        assert_eq!(rel(40), "<1m", "under a minute still has time left");
-        assert_eq!(rel(95), "1m");
-        assert_eq!(rel(2 * 3600 + 5 * 60), "2h 5m");
-        assert_eq!(rel(25 * 3600), "1d 1h");
+        assert!(!fmt_reset(now + Duration::seconds(40), now).expired, "under a minute still has time left");
+        assert!(!fmt_reset(now + Duration::seconds(95), now).expired);
         assert!(fmt_reset(now, now).expired, "the clock ran out, wait for a poll");
         assert!(fmt_reset(now - Duration::seconds(30), now).expired);
-    }
-
-    /// The small designs have room for the leading unit and nothing else, so
-    /// the countdown must survive being cut down to it.
-    #[test]
-    fn the_tiny_countdown_keeps_the_leading_unit() {
-        let now = Utc::now();
-        let tiny = |secs: i64| fmt_reset(now + Duration::seconds(secs), now).tiny;
-
-        assert_eq!(tiny(40), "<1m");
-        assert_eq!(tiny(95), "1m");
-        assert_eq!(tiny(2 * 3600 + 5 * 60), "2h");
-        assert_eq!(tiny(25 * 3600), "1d");
-        assert_eq!(tiny(-30), "…", "no room for a word on a nano row");
+        // Minutes never go negative, so the sentence stays grammatical.
+        assert_eq!(fmt_reset(now - Duration::seconds(30), now).mins, 0);
     }
 
     #[test]
@@ -831,26 +785,24 @@ mod tests {
         use super::ResetParts;
         use crate::i18n::Language;
 
-        let parts = |abs: &str, rel: &str, tiny: &str, mins: i64, expired: bool| ResetParts {
+        let parts = |abs: &str, mins: i64, expired: bool| ResetParts {
             abs: abs.into(),
-            rel: rel.into(),
-            tiny: tiny.into(),
             mins,
             expired,
         };
 
-        let res = parts("01:16", "2h 0m", "2h", 120, false);
+        let res = parts("01:16", 120, false);
         assert_eq!(format_reset_time(Language::Russian, &res), "Сброс в 1:16 через 120 минут");
         assert_eq!(format_reset_time(Language::English, &res), "Reset at 1:16 in 120 minutes");
 
-        let res_1 = parts("01:16", "1m", "1m", 1, false);
+        let res_1 = parts("01:16", 1, false);
         assert_eq!(format_reset_time(Language::Russian, &res_1), "Сброс в 1:16 через 1 минуту");
         assert_eq!(format_reset_time(Language::English, &res_1), "Reset at 1:16 in 1 minute");
 
-        let res_2 = parts("01:16", "2m", "2m", 2, false);
+        let res_2 = parts("01:16", 2, false);
         assert_eq!(format_reset_time(Language::Russian, &res_2), "Сброс в 1:16 через 2 минуты");
 
-        let res_expired = parts("01:16", "", "…", 0, true);
+        let res_expired = parts("01:16", 0, true);
         assert_eq!(format_reset_time(Language::Russian, &res_expired), "обновление…");
         assert_eq!(format_reset_time(Language::English, &res_expired), "updating…");
     }
