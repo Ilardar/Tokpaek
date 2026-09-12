@@ -50,25 +50,25 @@ fn hours_word_ru(hours: i64) -> &'static str {
 
 fn day_of_week_ru(weekday: chrono::Weekday) -> &'static str {
     match weekday {
-        chrono::Weekday::Mon => "в понедельник",
-        chrono::Weekday::Tue => "во вторник",
-        chrono::Weekday::Wed => "в среду",
-        chrono::Weekday::Thu => "в четверг",
-        chrono::Weekday::Fri => "в пятницу",
-        chrono::Weekday::Sat => "в субботу",
-        chrono::Weekday::Sun => "в воскресенье",
+        chrono::Weekday::Mon => "в пон.",
+        chrono::Weekday::Tue => "во вт.",
+        chrono::Weekday::Wed => "в ср.",
+        chrono::Weekday::Thu => "в чтв.",
+        chrono::Weekday::Fri => "в птн.",
+        chrono::Weekday::Sat => "в суб.",
+        chrono::Weekday::Sun => "в вск.",
     }
 }
 
 fn day_of_week_en(weekday: chrono::Weekday) -> &'static str {
     match weekday {
-        chrono::Weekday::Mon => "on Monday",
-        chrono::Weekday::Tue => "on Tuesday",
-        chrono::Weekday::Wed => "on Wednesday",
-        chrono::Weekday::Thu => "on Thursday",
-        chrono::Weekday::Fri => "on Friday",
-        chrono::Weekday::Sat => "on Saturday",
-        chrono::Weekday::Sun => "on Sunday",
+        chrono::Weekday::Mon => "on monday",
+        chrono::Weekday::Tue => "on tuesday",
+        chrono::Weekday::Wed => "on wednesday",
+        chrono::Weekday::Thu => "on thursday",
+        chrono::Weekday::Fri => "on friday",
+        chrono::Weekday::Sat => "on saturday",
+        chrono::Weekday::Sun => "on sunday",
     }
 }
 
