@@ -50,13 +50,13 @@ fn hours_word_ru(hours: i64) -> &'static str {
 
 fn day_of_week_ru(weekday: chrono::Weekday) -> &'static str {
     match weekday {
-        chrono::Weekday::Mon => "в пон.",
-        chrono::Weekday::Tue => "во вт.",
-        chrono::Weekday::Wed => "в ср.",
-        chrono::Weekday::Thu => "в чтв.",
-        chrono::Weekday::Fri => "в птн.",
-        chrono::Weekday::Sat => "в суб.",
-        chrono::Weekday::Sun => "в вск.",
+        chrono::Weekday::Mon => "в понедельник",
+        chrono::Weekday::Tue => "во вторник",
+        chrono::Weekday::Wed => "в среду",
+        chrono::Weekday::Thu => "в четверг",
+        chrono::Weekday::Fri => "в пятницу",
+        chrono::Weekday::Sat => "в субботу",
+        chrono::Weekday::Sun => "в воскресенье",
     }
 }
 
