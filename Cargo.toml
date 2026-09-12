@@ -1,6 +1,6 @@
 [package]
 name = "tokpaek"
-version = "1.9.0"
+version = "1.9.1"
 edition = "2021"
 description = "Tokpaek - a movable strip showing the quota and reset timers of the AI tool you are using"
 

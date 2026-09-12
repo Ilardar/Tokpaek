@@ -49,6 +49,8 @@ fn direct(exe: &str) -> Option<Family> {
     match base {
         "claude" => Some(Family::Claude),
         "codex" | "chatgpt" => Some(Family::Codex),
+        // The IDE's process is `antigravity ide.exe`; the app's own folder
+        // spelling ("Antigravity IDE") also shows up in some builds.
         "antigravity" | "antigravity ide" | "agy" | "opencode" => Some(Family::Antigravity),
         _ => None,
     }
@@ -184,14 +186,18 @@ pub fn debounce(
 
 /// The apps the widget watches. It draws over their windows while at least
 /// one of them is open and not minimized — no matter what sits in the
-/// foreground. Exe base names, lower-cased.
-const WATCHED_EXES: [&str; 3] = ["antigravity", "claude", "chatgpt"];
+/// foreground. Matched by exe-name prefix: Antigravity ships as both
+/// `Antigravity.exe` and `Antigravity IDE.exe`, and an exact-name list missed
+/// the IDE — Smart Focus then hid the widget with the IDE wide open.
+const WATCHED_PREFIXES: [&str; 3] = ["antigravity", "claude", "chatgpt"];
 
 /// Is an exe one of the watched apps?
 pub fn is_watched(exe: &str) -> bool {
     let lower = exe.to_lowercase();
     let base = lower.strip_suffix(".exe").unwrap_or(&lower);
-    WATCHED_EXES.contains(&base)
+    WATCHED_PREFIXES
+        .iter()
+        .any(|p| base == *p || base.starts_with(&format!("{p} ")))
 }
 
 /// True when at least one watched app has a visible, non-minimized top-level
@@ -520,6 +526,10 @@ fn detect_and_publish() {
     drop(d);
     publish_status(status);
     if status != before {
+        crate::diaglog::diag(&format!(
+            "active: visible={} fg_watched={} family={:?}",
+            status.is_ai, status.foreground_watched, status.family
+        ));
         if let Some(ctx) = WAKE_CTX.get() {
             ctx.request_repaint();
         }
@@ -747,6 +757,23 @@ mod tests {
         assert_eq!(classify_exe("conhost.exe"), ExeKind::Terminal);
         assert_eq!(classify_exe("chrome.exe"), ExeKind::Other);
         assert_eq!(classify_exe("explorer.exe"), ExeKind::Other);
+    }
+
+    #[test]
+    fn watched_apps_match_by_prefix_not_exact_name() {
+        // The bug: Antigravity IDE ships as "Antigravity IDE.exe" and an
+        // exact-name list missed it, hiding the widget with the IDE open.
+        assert!(is_watched("antigravity.exe"));
+        assert!(is_watched("Antigravity IDE.exe"));
+        assert!(is_watched("ANTIGRAVITY ide"));
+        assert!(is_watched("claude.exe"));
+        assert!(is_watched("chatgpt.exe"));
+        // Not every exe starting with a watched string: only a whole word
+        // followed by nothing or a space.
+        assert!(!is_watched("claude-helper.exe"));
+        assert!(!is_watched("antigravity_server.exe"));
+        assert!(!is_watched("codex.exe"), "codex CLI is not a watched window app");
+        assert!(!is_watched("chrome.exe"));
     }
 
     #[test]
