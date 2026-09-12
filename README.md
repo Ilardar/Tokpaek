@@ -77,10 +77,4 @@ powershell -ExecutionPolicy Bypass -File tools\build-installer.ps1
 
 ---
 
-# Создано с ❤️
-
-🙋 **Группа в Телеграм:** [@nova_txt](https://t.me/nova_txt) — вопросы, новости,
-поддержка.
-
-☕ **[Отблагодарить](https://nova-app.eu/donate)** — если Токпаёк оказался полезным.
-Это необязательный способ сказать "спасибо".
+# Создано на основе форка [Quotty](https://github.com/confeden/Quotty)): спасибо @confeden
