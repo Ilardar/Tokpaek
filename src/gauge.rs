@@ -124,14 +124,6 @@ pub fn reset_body(lang: Language, parts: &ResetParts) -> String {
         Language::English => parts.abs.clone(),
     };
     let abs_clean = abs.strip_prefix('0').unwrap_or(&abs);
-    // Beyond a day, raw minutes read as "через 10001 минуту": switch to the
-    // day/hour countdown (`rel`), which is also the shortest wording.
-    if parts.mins >= 1440 {
-        return match lang {
-            Language::Russian => format!("в {abs_clean} через {}", parts.rel),
-            Language::English => format!("at {abs_clean} in {}", parts.rel),
-        };
-    }
     match lang {
         Language::Russian => {
             let w = minutes_word_ru(parts.mins);
@@ -769,28 +761,36 @@ mod tests {
     use chrono::{Duration, Utc};
 
     /// Exhaustive sweep of every reset sentence the pill can be asked to show:
-    /// both formatters × both languages × the whole timer range (0 minutes to
-    /// 8 days, stepping 1 minute), at a fixed `now` with an awkward local time
-    /// (two-digit hour). The pill fits ~31 characters at the full 9.5·s font
-    /// and shrinks to 65% (~48 chars) before overflowing; nothing may exceed
-    /// the shrink capacity, and the sweep reports the longest string per
-    /// combination so a future wording change trips this test.
+    /// both formatters × both languages × their real ranges (the 5-hour
+    /// window spans at most ~5 h ≈ 300 min; the weekly timer up to 7 days),
+    /// stepping 1 minute at a fixed `now` with an awkward local time
+    /// (two-digit hour, long weekday names). The pill fits ~31 characters at
+    /// the full 9.5·s font and shrinks to 65% (~48 chars) before overflowing;
+    /// nothing may exceed the shrink capacity, and the sweep reports the
+    /// longest string per combination so a future wording change trips this.
     #[test]
     fn no_reset_string_outgrows_the_pill() {
+        use chrono::TimeZone;
         // A Wednesday at 23:47 local-ish: forces two-digit hours, the longest
         // weekday names and the "other day" weekly branch.
         let now = Utc.with_ymd_and_hms(2026, 9, 9, 20, 47, 0).unwrap();
 
-        use chrono::TimeZone;
         let mut worst = [String::new(), String::new(), String::new(), String::new()];
         let mut worst_len = [0usize; 4];
+        // 5h window: a bit past its full span; weekly: a full 8 days.
         for min in 0..=(8 * 24 * 60) {
             let reset = now + Duration::minutes(min);
-            let parts = fmt_reset(reset, now);
             for (lang, base) in [(Language::Russian, 0usize), (Language::English, 2)] {
-                let s5 = format_reset_time(lang, &parts);
-                let sw = format_weekly_reset_time(lang, Some(reset), now);
-                for (i, s) in [(base, &s5), (base + 1, &sw)] {
+                let candidates: [Option<String>; 2] = [
+                    // The 5-hour pill only ever counts its own window.
+                    (min <= 360).then(|| {
+                        format_reset_time(lang, &fmt_reset(reset, now))
+                    }),
+                    Some(format_weekly_reset_time(lang, Some(reset), now)),
+                ];
+                for (off, s) in candidates.into_iter().enumerate() {
+                    let Some(s) = s else { continue };
+                    let i = base + off;
                     let n = s.chars().count();
                     if n > worst_len[i] {
                         worst_len[i] = n;
