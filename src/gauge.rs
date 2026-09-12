@@ -91,6 +91,27 @@ pub struct ResetParts {
     pub expired: bool,
 }
 
+/// chrono's `%a` is always English; the Russian sentence must not read
+/// "в Wed 22:28".
+fn weekday_short_ru(abs: &str) -> String {
+    let (head, rest) = abs.split_once(' ').unwrap_or(("", abs));
+    let ru = match head {
+        "Mon" => "пн",
+        "Tue" => "вт",
+        "Wed" => "ср",
+        "Thu" => "чт",
+        "Fri" => "пт",
+        "Sat" => "сб",
+        "Sun" => "вс",
+        _ => head,
+    };
+    if head.is_empty() {
+        abs.to_string()
+    } else {
+        format!("{ru} {rest}")
+    }
+}
+
 /// The countdown text without its "Сброс "/"Reset " prefix — the part the
 /// context menu and the hover tooltip re-use verbatim, so nothing ever has to
 /// strip a formatted sentence back apart.
@@ -98,7 +119,19 @@ pub fn reset_body(lang: Language, parts: &ResetParts) -> String {
     if parts.expired {
         return lang.text("обновление…", "updating…").to_string();
     }
-    let abs_clean = parts.abs.strip_prefix('0').unwrap_or(&parts.abs);
+    let abs = match lang {
+        Language::Russian => weekday_short_ru(&parts.abs),
+        Language::English => parts.abs.clone(),
+    };
+    let abs_clean = abs.strip_prefix('0').unwrap_or(&abs);
+    // Beyond a day, raw minutes read as "через 10001 минуту": switch to the
+    // day/hour countdown (`rel`), which is also the shortest wording.
+    if parts.mins >= 1440 {
+        return match lang {
+            Language::Russian => format!("в {abs_clean} через {}", parts.rel),
+            Language::English => format!("at {abs_clean} in {}", parts.rel),
+        };
+    }
     match lang {
         Language::Russian => {
             let w = minutes_word_ru(parts.mins);
@@ -250,6 +283,25 @@ pub fn format_weekly_reset_time(
         Language::Russian => format!("Сброс {body}"),
         Language::English => format!("Reset {body}"),
     }
+}
+
+/// Shrink `size` until `text` measures no wider than `max_w`, but never below
+/// 65% of it — below that the text is unreadable and overflowing is the lesser
+/// evil. Measurement uses the painter's own font table, so it matches what
+/// will actually be drawn.
+pub fn fit_font_size(painter: &egui::Painter, text: &str, size: f32, max_w: f32) -> f32 {
+    let floor = size * 0.65;
+    let mut s = size;
+    while s > floor {
+        let w = painter.layout_no_wrap(text.to_string(), FontId::proportional(s), Color32::WHITE)
+            .size()
+            .x;
+        if w <= max_w {
+            break;
+        }
+        s = (s * 0.92).max(floor);
+    }
+    s
 }
 
 pub fn draw(ui: &mut egui::Ui, settings: &Settings, state: ActiveState) {
@@ -459,12 +511,18 @@ pub fn draw(ui: &mut egui::Ui, settings: &Settings, state: ActiveState) {
             egui::Rounding::same(pill_h / 2.0),
             egui::Stroke::new(0.9_f32, pill_stroke_col),
         );
+        // The pill is a fixed 160·s wide, but the reset sentence is not: the
+        // weekly one reaches "Сброс в понедельник через 168 часов". Measure
+        // and shrink the font until it fits (down to 65%), instead of letting
+        // long strings hang over the pill's ends.
+        let text_color = Color32::from_rgba_unmultiplied(248, 250, 255, (op * 255.0) as u8);
+        let font_size = fit_font_size(&painter, &reset_str, 9.5 * s, pill_w - 12.0 * s);
         painter.text(
             pill_rect.center(),
             Align2::CENTER_CENTER,
             reset_str,
-            FontId::proportional(9.5 * s),
-            Color32::from_rgba_unmultiplied(248, 250, 255, (op * 255.0) as u8),
+            FontId::proportional(font_size),
+            text_color,
         );
 
         // Active timer text highlight colors
@@ -706,8 +764,63 @@ pub fn fmt_reset(reset: DateTime<Utc>, now: DateTime<Utc>) -> ResetParts {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_reset, format_reset_time};
+    use super::{fmt_reset, format_reset_time, format_weekly_reset_time};
+    use crate::i18n::Language;
     use chrono::{Duration, Utc};
+
+    /// Exhaustive sweep of every reset sentence the pill can be asked to show:
+    /// both formatters × both languages × the whole timer range (0 minutes to
+    /// 8 days, stepping 1 minute), at a fixed `now` with an awkward local time
+    /// (two-digit hour). The pill fits ~31 characters at the full 9.5·s font
+    /// and shrinks to 65% (~48 chars) before overflowing; nothing may exceed
+    /// the shrink capacity, and the sweep reports the longest string per
+    /// combination so a future wording change trips this test.
+    #[test]
+    fn no_reset_string_outgrows_the_pill() {
+        // A Wednesday at 23:47 local-ish: forces two-digit hours, the longest
+        // weekday names and the "other day" weekly branch.
+        let now = Utc.with_ymd_and_hms(2026, 9, 9, 20, 47, 0).unwrap();
+
+        use chrono::TimeZone;
+        let mut worst = [String::new(), String::new(), String::new(), String::new()];
+        let mut worst_len = [0usize; 4];
+        for min in 0..=(8 * 24 * 60) {
+            let reset = now + Duration::minutes(min);
+            let parts = fmt_reset(reset, now);
+            for (lang, base) in [(Language::Russian, 0usize), (Language::English, 2)] {
+                let s5 = format_reset_time(lang, &parts);
+                let sw = format_weekly_reset_time(lang, Some(reset), now);
+                for (i, s) in [(base, &s5), (base + 1, &sw)] {
+                    let n = s.chars().count();
+                    if n > worst_len[i] {
+                        worst_len[i] = n;
+                        worst[i] = s.clone();
+                    }
+                }
+            }
+        }
+
+        // The pill at 65% of 9.5·s fits roughly 48 characters of Segoe UI.
+        const CAP: usize = 48;
+        for (i, label) in ["5h RU", "weekly RU", "5h EN", "weekly EN"].iter().enumerate() {
+            assert!(
+                worst_len[i] <= CAP,
+                "{label}: longest string is {} chars (> {CAP}): {:?}",
+                worst_len[i],
+                worst[i]
+            );
+        }
+        // Sanity: the sweep actually exercised the long branches, not empties.
+        assert!(worst_len[1] >= 25, "weekly RU never got long: {:?}", worst[1]);
+        assert!(worst_len[3] >= 25, "weekly EN never got long: {:?}", worst[3]);
+
+        for (label, (s, n)) in ["5h RU", "weekly RU", "5h EN", "weekly EN"]
+            .iter()
+            .zip(worst.iter().zip(worst_len))
+        {
+            println!("{label:>10}: {n:>3} chars | {s:?}");
+        }
+    }
 
     /// The window is still counting until its reset actually passes: rounding
     /// the last seconds down to "0m" read as "already reset".
