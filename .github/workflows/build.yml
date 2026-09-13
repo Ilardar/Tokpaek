@@ -3,7 +3,8 @@ name: Build
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    # Release tags are the build stamp itself: {yy}.{ordinal}, e.g. 26.256.
+    tags: ["2[0-9].[1-9]?[0-9]"]
   pull_request:
   workflow_dispatch:
 
@@ -42,12 +43,36 @@ jobs:
           path: target/release/tokpaek.exe
           if-no-files-found: error
 
-  # On a version tag (v1.9.1, …) attach the exe to a GitHub release.
+  # Manual dispatch: cut a release tag named after today's build stamp
+  # ({yy}.{ordinal}) and push it — the tag push reruns this workflow and the
+  # release job below picks it up. The exe's embedded FileVersion uses the
+  # same formula (build.rs), so tag and binary always agree.
+  cut-tag:
+    name: Cut release tag
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compute {yy}.{ordinal} and push the tag
+        run: |
+          TAG="$(date -u +%y).$(date -u +%j | sed 's/^0*//')"
+          echo "Release tag: $TAG"
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists — nothing to cut."
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
   release:
     name: Publish release
     runs-on: ubuntu-latest
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/2')
     permissions:
       contents: write
     steps:
@@ -55,8 +80,14 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: tokpaek-windows-x64
+      - name: Name the exe after the release
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          cp tokpaek.exe "Tokpaek-${TAG}.exe"
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: tokpaek.exe
+          files: |
+            tokpaek.exe
+            Tokpaek-${{ github.ref_name }}.exe
           generate_release_notes: true
