@@ -1,75 +1,122 @@
 # Tokpaek
 
+<p align="left">
+  <a href="https://github.com/Ilardar/Tokpaek/releases/latest"><img src="https://img.shields.io/github/v/release/Ilardar/Tokpaek?color=2ea44f&label=release" alt="Release" /></a>
+  <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue" alt="Platform" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-blue.svg" alt="License" /></a>
+  <img src="https://img.shields.io/badge/rust-2021-orange.svg" alt="Rust 2021" />
+</p>
+
 **English** | [Русский](README.md)
 
-A circular quota widget for Google Antigravity — shows your remaining limit and reset countdown right on top of the active IDE or tool window.
+**Tokpaek** is a sleek, lightweight circular quota widget designed specifically for **Google Antigravity**. It displays real-time quota usage and reset countdowns floating directly over your IDE, application, or terminal workspace.
+
+---
+
+### Preview
 
 | Continuous Arc (5 hours) | Continuous Arc (7 days) | Segmented Scale | Quota Warning Alert |
 | :---: | :---: | :---: | :---: |
 | <img src="assets/eng/widget_arc_5h.png" width="180" alt="Continuous Arc — 5 Hours" /> | <img src="assets/eng/widget_arc_7d.png" width="180" alt="Continuous Arc — 7 Days" /> | <img src="assets/eng/widget_cells_pool.png" width="180" alt="Segmented Scale" /> | <img src="assets/eng/widget_cells_warning.png" width="180" alt="Quota Warning Alert" /> |
-| *5h session reset* | *7-day limit reset* | *Cell / pool mode* | *Exhausted limit indicator* |
+| *5h session reset* | *7-day limit reset* | *Cell / pool mode* | *Red alert when < 5%* |
 
-The widget automatically monitors your Antigravity environment and can hide itself when you switch away ("Smart Focus"):
-
-- **Antigravity 2.0** — Antigravity desktop application;
-- **Antigravity IDE** — development environment & local language server;
-- **Antigravity CLI** — command-line interface.
+---
 
 ## Features
 
-- **Circular dual-arc gauge**: top arc — rolling window (5 hours), bottom arc — seven days or quota pool (switchable).
-- **Reset timer** in the central pill: toggle between 5 hours and 7 days with a single click; shows exact reset time and countdown.
-- **Color palettes**: Gradient (smooth green → yellow → red), Traffic Light, Cyan, Monochrome.
-- **Scale format**: Decimal (10 cells), Hour (12 cells), or Continuous smooth arc. Crisp rendering at any scale.
-- **Smart Focus**: Widget is visible only when Antigravity (IDE or CLI) is active, staying anchored over its window.
-- **Always on Top**: Optional toggle if you prefer the widget to remain pinned above all windows.
-- **Mouse resize**: Drag the outer ring edge to resize just like a normal window; drag center to move. Size and position are saved.
-- **Opacity and polling interval**: Sliders with quick preset buttons.
-- Clean and lightweight: No taskbar clutter, left-click to drag, right-click for settings/context menu or via system tray.
-- Update check via GitHub release tags — only on user demand.
+* **Dual-Arc Gauge:**
+  * **Top arc:** 5-hour rolling session window (primary model quota).
+  * **Bottom arc:** 7-day weekly limit or shared model quota pool (configurable).
+* **Interactive Reset Countdown:**
+  * The center pill shows the exact reset time and live countdown (minutes or days/hours).
+  * Single-click the center pill to instantly toggle between the 5-hour and 7-day timers.
+* **Customization & Themes:**
+  * **4 color palettes:** *Gradient* (smooth green → yellow → red), *Traffic Light* (three discrete thirds), *Cyan*, and *Monochrome*.
+  * **3 scale styles:** Continuous smooth arc, 12-segment clock scale, or 10-segment decimal scale.
+  * **Visual alert:** Segments turn red automatically when quota drops below 5%.
+* **Smart Focus:**
+  * Automatically hides when you switch to other tasks (browser, chats) and reappears whenever Antigravity is active.
+  * **"Always on Top"** toggle for users who prefer continuous visibility.
+* **Effortless Window Controls:**
+  * Drag freely anywhere on the screen by holding LMB on the center.
+  * Smooth resize by dragging the outer circular border, just like a standard window.
+  * Window size, position, and opacity are saved automatically.
+  * Zero taskbar clutter — unobtrusive system tray icon and right-click context menu.
 
-## Privacy
+---
 
-- **Zero telemetry.** No analytics, tracking pixels, or stats collection.
-- **Zero ads.** No banners, affiliate links, or promotional popups.
-- **Zero third-party servers.** The app connects solely to the local Antigravity language server on 127.0.0.1.
-- Data is queried locally from the running Antigravity language server. Tokpaek never touches external credential stores or sends data outside.
-- The only outgoing network request is checking GitHub for new releases (on demand).
-- Settings are saved locally in `%APPDATA%\Tokpaek\settings.json`.
+## Supported Antigravity Environments
 
-## Data Sources
+Tokpaek monitors active Antigravity surfaces on your machine:
 
-| Tool | Source |
+* **Antigravity 2.0** — desktop application;
+* **Antigravity IDE** — developer environment and local language server;
+* **Antigravity CLI (`agy`)** — command-line interface running in terminals.
+
+---
+
+## Controls Reference
+
+| Action | How to perform |
 |---|---|
-| Antigravity | Local Antigravity language server — same request used by the IDE usage panel |
+| **Move widget** | Hold **LMB** in the center and drag |
+| **Resize** | Drag the **outer edge** of the ring with your mouse cursor |
+| **Toggle countdown (5h / 7d)** | Click **LMB on the center pill** |
+| **Open Settings / Menu** | Click **RMB** on the widget or system tray icon |
+| **Reset position ("Home")** | RMB → **Home** (moves to top-left screen corner) |
 
-If Antigravity is not currently running, the widget waits gracefully for the language server to become available.
+---
+
+## Privacy & Security
+
+* **Zero telemetry:** No analytics, tracking pixels, or diagnostic telemetry collection.
+* **Zero advertisements:** No banners, affiliate links, or promotional popups.
+* **No external servers:** Tokpaek connects solely to the local Antigravity language server on `127.0.0.1`.
+* **Local credentials:** Session discovery queries the local process table and local daemon descriptors. Nothing is written to external files, and no data leaves your PC.
+* **Configuration:** Stored locally in `%APPDATA%\Tokpaek\settings.json`.
+
+---
+
+## Data Source
+
+| Provider | Data Source |
+|---|---|
+| **Antigravity** | Local Antigravity language server — uses the exact same internal RPC endpoint queried by the IDE's built-in usage panel |
+
+When Antigravity is closed, the widget stays in standby mode and resumes automatically as soon as the language server starts up.
+
+---
 
 ## Installation
 
-Download `Tokpaek-Setup.exe` from the [Releases](https://github.com/Ilardar/Tokpaek/releases) page and run it. Installs into the user profile without requiring administrator privileges.
+### Option 1. Installer (Recommended)
+Download **[Tokpaek-Setup.exe](https://github.com/Ilardar/Tokpaek/releases/latest/download/Tokpaek-Setup.exe)** from the [Releases](https://github.com/Ilardar/Tokpaek/releases) page:
+* Installs into your user profile (`%LOCALAPPDATA%`), requiring no administrator privileges.
+* Optional system autostart toggle during installation.
 
-You can enable autostart on system boot during installation or toggle it later in settings or the tray menu.
+### Option 2. Portable
+Download **`tokpaek.exe`** from the latest release — no installation required.
 
-## Usage
-
-- **LMB on circle** — drag to move; **LMB on central pill** — switch countdown timer (FIVE HOURS / SEVEN DAYS).
-- **Circle edge** — resize with mouse cursor.
-- **RMB on widget** — context menu: Refresh, Home (top-left corner), Always on Top, Settings, Exit.
-- **System tray icon** — access the same options and settings window.
+---
 
 ## Requirements
 
-- Windows 10/11, x64.
-- Running Antigravity application, IDE, or CLI (quota is retrieved from its local language server).
+* **Operating System:** Windows 10 / 11, x64.
+* **Antigravity:** Running Antigravity app, IDE, or CLI session.
+
+---
 
 ## Building from Source
+
+Requires the [Rust toolchain](https://rustup.rs/):
 
 ```bash
 cargo build --release
 ```
 
-Installer (requires [Inno Setup 6](https://jrsoftware.org/isdl.php)):
+The output binary is located at `target/release/tokpaek.exe`.
+
+To build the installer package (requires [Inno Setup 6](https://jrsoftware.org/isdl.php)):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\build-installer.ps1
@@ -77,4 +124,6 @@ powershell -ExecutionPolicy Bypass -File tools\build-installer.ps1
 
 ---
 
-## Based on [Quotty](https://github.com/confeden/Quotty) — thanks to @confeden
+## Credits
+
+Based on the [Quotty](https://github.com/confeden/Quotty) project — special thanks to [@confeden](https://github.com/confeden).
