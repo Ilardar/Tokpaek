@@ -9,7 +9,7 @@
 
 **English** | [Русский](README.md)
 
-**Tokpaek** is a sleek, lightweight circular quota widget designed specifically for **Google Antigravity**. It displays real-time quota usage and reset countdowns floating directly over your IDE, application, or terminal workspace.
+**Tokpaek** is a sleek, lightweight circular quota widget for **Google Antigravity**, **Claude**, and **Codex**. It displays real-time quota usage and reset countdowns floating directly over your IDE, application, or terminal workspace, with one-click switching between sources.
 
 ---
 
@@ -24,6 +24,9 @@
 
 ## Features
 
+* **Multiple Data Sources — Claude, Codex, and Antigravity:**
+  * Pick a source from the right-click context menu or the tray menu.
+  * **Auto** mode follows the active window; pin a specific source to stop auto-switching.
 * **Dual-Arc Gauge:**
   * **Top arc:** 5-hour rolling session window (primary model quota).
   * **Bottom arc:** 7-day weekly limit or shared model quota pool (configurable).
@@ -45,13 +48,15 @@
 
 ---
 
-## Supported Antigravity Environments
+## Supported Sources
 
-Tokpaek monitors active Antigravity surfaces on your machine:
+Tokpaek monitors active AI environments on your machine:
 
 * **Antigravity 2.0** — desktop application;
 * **Antigravity IDE** — developer environment and local language server;
-* **Antigravity CLI (`agy`)** — command-line interface running in terminals.
+* **Antigravity CLI (`agy`)** — command-line interface running in terminals;
+* **Claude Desktop / Claude Code / Claude CLI** — shared Anthropic account (5-hour and weekly windows);
+* **Codex / ChatGPT Desktop** — OpenAI account (primary and weekly windows).
 
 ---
 
@@ -62,6 +67,7 @@ Tokpaek monitors active Antigravity surfaces on your machine:
 | **Move widget** | Hold **LMB** in the center and drag |
 | **Resize** | Drag the **outer edge** of the ring with your mouse cursor |
 | **Toggle countdown (5h / 7d)** | Click **LMB on the center pill** |
+| **Switch data source** | RMB → **Data source** (Auto / Claude / Codex / Antigravity) |
 | **Open Settings / Menu** | Click **RMB** on the widget or system tray icon |
 | **Reset position ("Home")** | RMB → **Home** (moves to top-left screen corner) |
 
@@ -71,8 +77,8 @@ Tokpaek monitors active Antigravity surfaces on your machine:
 
 * **Zero telemetry:** No analytics, tracking pixels, or diagnostic telemetry collection.
 * **Zero advertisements:** No banners, affiliate links, or promotional popups.
-* **No external servers:** Tokpaek connects solely to the local Antigravity language server on `127.0.0.1`.
-* **Local credentials:** Session discovery queries the local process table and local daemon descriptors. Nothing is written to external files, and no data leaves your PC.
+* **Official endpoints only:** Antigravity is read from the local server on `127.0.0.1`; Claude and Codex query the official Anthropic and OpenAI APIs. No intermediary or third-party servers.
+* **Local credentials:** Tokens are read locally (Claude Desktop profile, `~/.codex/auth.json`, Antigravity process descriptors). Nothing is written to system files, and no data is sent anywhere except the official API of the selected source.
 * **Configuration:** Stored locally in `%APPDATA%\Tokpaek\settings.json`.
 
 ---
@@ -82,8 +88,10 @@ Tokpaek monitors active Antigravity surfaces on your machine:
 | Provider | Data Source |
 |---|---|
 | **Antigravity** | Local Antigravity language server — uses the exact same internal RPC endpoint queried by the IDE's built-in usage panel |
+| **Claude** | Official Anthropic API (`api.anthropic.com`) using the token from the local Claude Desktop profile; also covers Claude Code / CLI |
+| **Codex** | Official OpenAI API (`chatgpt.com`) using the token from `~/.codex/auth.json` |
 
-When Antigravity is closed, the widget stays in standby mode and resumes automatically as soon as the language server starts up.
+When the selected source is unavailable (the app is closed or no token is found), the widget stays in standby and resumes automatically once the source is back.
 
 ---
 
@@ -102,7 +110,7 @@ Download **`tokpaek.exe`** from the latest release — no installation required.
 ## Requirements
 
 * **Operating System:** Windows 10 / 11, x64.
-* **Antigravity:** Running Antigravity app, IDE, or CLI session.
+* **Data source:** a running environment for at least one source — Antigravity (app/IDE/CLI), Claude Desktop (or Claude Code/CLI), or Codex CLI.
 
 ---
 
