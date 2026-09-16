@@ -39,6 +39,11 @@ pub struct Settings {
     pub antigravity_enabled: bool,
     /// Pinned family, and the one restored at startup.
     pub family: Family,
+    /// A source the user picked by hand in a menu. `Some(f)` pins the widget to
+    /// `f` and outranks detection — the foreground app no longer switches it;
+    /// `None` is the default "follow the app in front" behavior. Cleared when
+    /// the pinned source is switched off in Settings → Sources.
+    pub pinned_family: Option<Family>,
     /// Verbose, anonymised logging next to the exe. Off unless asked for.
     pub diagnostics: bool,
     /// Draw the widget only over the apps it watches (Antigravity, Claude,
@@ -69,6 +74,7 @@ impl Default for Settings {
             codex_enabled: true,
             antigravity_enabled: true,
             family: Family::Claude,
+            pinned_family: None,
             diagnostics: false,
             smart_focus: false,
             always_on_top: true,
@@ -204,6 +210,11 @@ impl Settings {
         if !self.enabled(self.family) {
             self.family = self.first_enabled();
         }
+        // A pin on a source that is switched off means nothing: drop back to
+        // following the app in front.
+        if self.pinned_family.is_some_and(|f| !self.enabled(f)) {
+            self.pinned_family = None;
+        }
         // With the lower arc replaced by Claude/GPT there is no seven-day arc,
         // so its timer cannot be showing.
         if self.circle_show_claude_gpt {
@@ -285,6 +296,9 @@ impl Settings {
         }
         if !self.enabled(self.family) {
             self.family = self.first_enabled();
+        }
+        if self.pinned_family.is_some_and(|f| !self.enabled(f)) {
+            self.pinned_family = None;
         }
     }
 
@@ -396,5 +410,30 @@ mod tests {
             !s.circle_show_weekly_reset,
             "with the lower arc replaced, the seven-day timer has nothing to show"
         );
+    }
+
+    #[test]
+    fn a_pin_on_a_disabled_source_is_cleared() {
+        // Turning the pinned source off in Sources drops the pin: the widget
+        // goes back to following the foreground app rather than showing a
+        // source that is switched off.
+        let mut s = Settings {
+            claude_enabled: true,
+            codex_enabled: false,
+            antigravity_enabled: true,
+            pinned_family: Some(Family::Antigravity),
+            ..Settings::default()
+        };
+        s.set_enabled(Family::Antigravity, false);
+        assert_eq!(s.pinned_family, None);
+
+        // The same invariant is enforced on a hand-edited file at load time.
+        let mut s = Settings {
+            antigravity_enabled: false,
+            pinned_family: Some(Family::Antigravity),
+            ..Settings::default()
+        };
+        s.sanitize();
+        assert_eq!(s.pinned_family, None);
     }
 }

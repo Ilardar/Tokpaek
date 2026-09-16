@@ -3,6 +3,8 @@
 //! effect is written exactly once, in `App::apply_menu_action`; the menus only
 //! present the items and translate clicks back into `MenuAction`.
 
+use crate::providers::Family;
+
 /// What the user picked in either menu. Check actions carry the new
 /// check-state, read from the menu itself, so handlers never touch items.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,6 +15,10 @@ pub enum MenuAction {
     Home,
     /// "Show above all windows", with its new state.
     AlwaysOnTop(bool),
+    /// Which source's data the widget shows. `Some(f)` pins the widget to `f`
+    /// and stops it from following the foreground app; `None` restores that
+    /// automatic "follow the app in front" behavior.
+    ShowFamily(Option<Family>),
     OpenSettings,
     /// Flush state and exit the process.
     Quit,

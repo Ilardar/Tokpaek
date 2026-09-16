@@ -137,11 +137,15 @@ fn show_context_menu(hwnd: isize, state: &ContextMenuState) -> Option<crate::men
     use windows::Win32::Foundation::{HWND, POINT};
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, SetForegroundWindow,
-        TrackPopupMenu, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_LEFTALIGN,
-        TPM_RETURNCMD, TPM_TOPALIGN,
+        TrackPopupMenu, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED,
+        TPM_LEFTALIGN, TPM_RETURNCMD, TPM_TOPALIGN,
     };
 
-    // Command ids: 1 refresh, 9 home, 8 always-on-top, 4 settings, 7 quit.
+    // Command ids: 1 refresh, 9 home, 8 always-on-top, 10 auto, 4 settings,
+    // 7 quit; 20 + Family::idx() picks a specific source.
+    const CMD_AUTO: usize = 10;
+    const CMD_FAMILY: usize = 20;
+
     let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
     unsafe {
         let hmenu = CreatePopupMenu().ok()?;
@@ -167,6 +171,41 @@ fn show_context_menu(hwnd: isize, state: &ContextMenuState) -> Option<crate::men
                 "Show above all windows",
             )),
         );
+
+        // The source choice only matters when more than one source is on: with
+        // a single ticked source there is nothing to choose between. Every
+        // enabled family gets an item plus "Auto" for following the app in front.
+        let sources: Vec<Family> = Family::ALL
+            .into_iter()
+            .filter(|f| state.enabled & (1 << f.idx()) != 0)
+            .collect();
+        if sources.len() > 1 {
+            let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
+            let _ = AppendMenuW(
+                hmenu,
+                MF_STRING | MF_GRAYED,
+                0,
+                &HSTRING::from(state.lang.text("Источник данных", "Data source")),
+            );
+            let _ = AppendMenuW(
+                hmenu,
+                MF_STRING | check(state.pinned.is_none()),
+                CMD_AUTO,
+                &HSTRING::from(state.lang.text(
+                    "Авто (по активному окну)",
+                    "Auto (follow active window)",
+                )),
+            );
+            for f in &sources {
+                let _ = AppendMenuW(
+                    hmenu,
+                    MF_STRING | check(state.pinned == Some(*f)),
+                    CMD_FAMILY + f.idx(),
+                    &HSTRING::from(f.name()),
+                );
+            }
+        }
+
         let _ = AppendMenuW(
             hmenu,
             MF_STRING,
@@ -200,6 +239,11 @@ fn show_context_menu(hwnd: isize, state: &ContextMenuState) -> Option<crate::men
             9 => Some(MenuAction::Home),
             // A check item click flips it; carry the new state.
             8 => Some(MenuAction::AlwaysOnTop(!state.always_on_top)),
+            CMD_AUTO => Some(MenuAction::ShowFamily(None)),
+            n if n >= CMD_FAMILY && n < CMD_FAMILY + Family::ALL.len() => {
+                let f = Family::ALL.into_iter().find(|f| f.idx() == n - CMD_FAMILY)?;
+                Some(MenuAction::ShowFamily(Some(f)))
+            }
             4 => Some(MenuAction::OpenSettings),
             7 => Some(MenuAction::Quit),
             _ => None,
@@ -210,6 +254,10 @@ fn show_context_menu(hwnd: isize, state: &ContextMenuState) -> Option<crate::men
 /// The facts the widget context menu is drawn from.
 struct ContextMenuState {
     always_on_top: bool,
+    /// The source pinned by hand; `None` means "follow the foreground app".
+    pinned: Option<Family>,
+    /// Bitmask of sources switched on in Settings → Sources.
+    enabled: u8,
     lang: Language,
 }
 
@@ -304,7 +352,7 @@ impl App {
         active::spawn_watcher(cc.egui_ctx.clone());
 
         let autostart = shortcuts::is_autostart_enabled();
-        let tray = Tray::new(settings.always_on_top, settings.language).ok();
+        let tray = Tray::new(settings.always_on_top, settings.pinned_family, settings.language).ok();
 
         // Route tray menu events through our own channel and wake the UI on each
         // one, so a menu choice is applied immediately instead of on the next
@@ -335,7 +383,12 @@ impl App {
         }));
 
         Self {
-            active: settings.family,
+            // A pinned source is the starting point too; otherwise fall back to
+            // whatever the widget showed last time.
+            active: settings
+                .pinned_family
+                .filter(|f| settings.enabled(*f))
+                .unwrap_or(settings.family),
             settings,
             shared,
             tray,
@@ -444,6 +497,23 @@ impl App {
                 self.last_topmost = f64::MIN;
                 ctx.request_repaint();
             }
+            MenuAction::ShowFamily(family) => {
+                // A hand-picked source outranks detection. `None` clears the
+                // pin — the widget goes back to following the foreground app.
+                // A source switched off in Settings cannot be pinned: the menu
+                // adapters already gray it out, this is the backstop.
+                let target = family.filter(|f| self.settings.enabled(*f));
+                self.settings.pinned_family = target;
+                self.settings.save();
+                if let Some(f) = target {
+                    self.active = f;
+                    self.settings.family = f;
+                    self.shared
+                        .want
+                        .store(f.idx() as u8, Ordering::Relaxed);
+                }
+                ctx.request_repaint();
+            }
         }
     }
 
@@ -484,14 +554,21 @@ impl App {
     /// ask the poller to refresh that family right away. Detection itself runs
     /// on the watcher thread (active.rs); this only reads its published answer,
     /// so the frame never walks the process list.
+    ///
+    /// A source pinned by hand (`settings.pinned_family`) outranks detection:
+    /// while it holds, the foreground app cannot switch the widget. Visibility
+    /// and the z-band still follow the foreground, only the quota shown is fixed.
     fn update_active(&mut self, t: f64) {
         let active_status = active::published();
         self.is_ai_active = active_status.is_ai;
         self.foreground_watched = active_status.foreground_watched;
 
-        let target = match active_status.family {
+        let target = match self.settings.pinned_family {
             Some(f) if self.settings.enabled(f) => f,
-            _ => self.active,
+            _ => match active_status.family {
+                Some(f) if self.settings.enabled(f) => f,
+                _ => self.active,
+            },
         };
         if target == self.active {
             return;
@@ -772,6 +849,7 @@ impl eframe::App for App {
             // toggle site (settings window, widget click, context menu, tray
             // menu) only changes `settings`, this frame applies them.
             tray.set_topmost_checked(self.settings.always_on_top);
+            tray.set_source_checked(self.settings.pinned_family, self.settings.enabled_mask());
         }
 
         // Z-order comes from the verdict — one decision, one executor.
@@ -854,6 +932,8 @@ impl eframe::App for App {
                         if let Some(h) = self.hwnd {
                             let state = ContextMenuState {
                                 always_on_top: self.settings.always_on_top,
+                                pinned: self.settings.pinned_family,
+                                enabled: self.settings.enabled_mask(),
                                 lang: self.settings.language,
                             };
                             if let Some(action) = show_context_menu(h, &state) {
