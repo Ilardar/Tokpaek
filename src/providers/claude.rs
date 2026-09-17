@@ -315,24 +315,59 @@ pub fn load_tokens() -> Result<Vec<OauthToken>, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Claude CLI token (`~/.claude.json`)
+// Claude CLI (a machine without Claude Desktop)
 // ---------------------------------------------------------------------------
 
-/// A machine with only the Claude CLI installed has no Desktop `config.json` to
-/// decrypt, but the CLI keeps its own OAuth token in plain JSON at
-/// `~/.claude.json` (`oauthAccount.accessToken`). It authenticates the same
-/// account, so the same usage endpoint answers for it. The CLI refreshes the
-/// token itself; we re-read the file every poll, exactly like the Codex module
-/// re-reads `auth.json`.
-fn cli_config_candidates() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+// A machine with only the Claude CLI installed has no Desktop `config.json` to
+// decrypt. Two local files cover it:
+// * `~/.claude/.credentials.json` — the CLI's own OAuth token, plain JSON;
+// * `~/.claude.json` — `cachedUsageUtilization`, the CLI's last usage report,
+//   which is the ready-made answer for the strip when the API is unreachable.
+//
+// The CLI refreshes both itself; we re-read them every poll, exactly like the
+// Codex module re-reads `auth.json`.
+
+/// Home-ish directories the CLI config may live under (home dir, or
+/// `CLAUDE_CONFIG_DIR` when it relocates the config directory).
+fn claude_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
     if let Ok(u) = std::env::var("USERPROFILE") {
-        paths.push(PathBuf::from(u).join(".claude.json"));
+        dirs.push(PathBuf::from(u));
     }
     if let Some(h) = dirs::home_dir() {
-        paths.push(h.join(".claude.json"));
+        dirs.push(h);
     }
-    // CLAUDE_CONFIG_DIR relocates the CLI's config directory on some setups.
+    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        if !dir.is_empty() {
+            dirs.push(PathBuf::from(&dir));
+        }
+    }
+    dirs.dedup();
+    dirs
+}
+
+/// Candidate paths for the CLI's OAuth credentials file.
+fn cli_credentials_candidates() -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = claude_dirs()
+        .into_iter()
+        .map(|d| d.join(".claude").join(".credentials.json"))
+        .collect();
+    // CLAUDE_CONFIG_DIR may itself *be* the config directory, not its parent.
+    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        if !dir.is_empty() {
+            paths.push(PathBuf::from(dir).join(".credentials.json"));
+        }
+    }
+    paths.dedup();
+    paths
+}
+
+/// Candidate paths for the CLI's state file (holds the cached usage).
+fn cli_state_candidates() -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = claude_dirs()
+        .into_iter()
+        .map(|d| d.join(".claude.json"))
+        .collect();
     if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
         if !dir.is_empty() {
             paths.push(PathBuf::from(dir).join(".claude.json"));
@@ -343,38 +378,41 @@ fn cli_config_candidates() -> Vec<PathBuf> {
 }
 
 #[derive(Deserialize)]
-struct CliConfig {
-    #[serde(default, rename = "oauthAccount")]
-    oauth_account: Option<CliOauthAccount>,
+struct CredentialsFile {
+    #[serde(default, rename = "claudeAiOauth")]
+    claude_ai_oauth: Option<CliCredentials>,
 }
 
 #[derive(Deserialize)]
-struct CliOauthAccount {
+struct CliCredentials {
     #[serde(default, rename = "accessToken")]
     access_token: Option<String>,
     /// Milliseconds since the epoch.
     #[serde(default, rename = "expiresAt")]
     expires_at: Option<i64>,
-    /// Space-separated scope list. Absent on older CLI versions.
     #[serde(default)]
-    scope: Option<String>,
+    scopes: Option<Vec<String>>,
+    #[serde(default, rename = "subscriptionType")]
+    subscription_type: Option<String>,
+    #[serde(default, rename = "rateLimitTier")]
+    rate_limit_tier: Option<String>,
 }
 
-/// Parse the Claude CLI config into a usable token, or say why not. Pure over
-/// the file text so the expiry/scope rules are testable without touching disk.
-fn parse_cli_token(raw: &str, now_ms: i64) -> Result<OauthToken, String> {
-    let cfg: CliConfig =
-        serde_json::from_str(raw).map_err(|e| format!("parse .claude.json: {e}"))?;
-    let Some(acct) = cfg.oauth_account else {
-        return Err("no oauthAccount in .claude.json".into());
+/// Parse the CLI credentials file into a usable token, or say why not. Pure
+/// over the file text so the expiry/scope rules are testable without disk.
+fn parse_cli_credentials(raw: &str, now_ms: i64) -> Result<OauthToken, String> {
+    let f: CredentialsFile =
+        serde_json::from_str(raw).map_err(|e| format!("parse .credentials.json: {e}"))?;
+    let Some(c) = f.claude_ai_oauth else {
+        return Err("no claudeAiOauth in .credentials.json".into());
     };
-    let access = acct
+    let access = c
         .access_token
         .filter(|t| !t.trim().is_empty())
-        .ok_or("oauthAccount has no accessToken")?;
-    // `expiresAt` is normally ms; accept a bare-seconds value from an older or
-    // hand-edited file rather than misreading it as already expired.
-    if let Some(raw_exp) = acct.expires_at {
+        .ok_or("claudeAiOauth has no accessToken")?;
+    // `expiresAt` is normally ms; accept a bare-seconds value rather than
+    // misreading it as already expired.
+    if let Some(raw_exp) = c.expires_at {
         let exp_ms = if raw_exp < 1_000_000_000_000 {
             raw_exp * 1000
         } else {
@@ -384,26 +422,26 @@ fn parse_cli_token(raw: &str, now_ms: i64) -> Result<OauthToken, String> {
             return Err("accessToken expired".into());
         }
     }
-    // The usage endpoint needs the profile scope. Honour a scope field when
-    // present; without one, assume the CLI's default login scope, which
-    // includes `user:profile`.
-    if let Some(scope) = &acct.scope {
-        if !scope.split_whitespace().any(|s| s == "user:profile") {
-            return Err("scope lacks user:profile".into());
+    // The usage endpoint needs the profile scope. Honour a scopes list when
+    // present; without one, assume the CLI's default login scope.
+    if let Some(scopes) = &c.scopes {
+        if !scopes.iter().any(|s| s == "user:profile") {
+            return Err("scopes lack user:profile".into());
         }
     }
     Ok(OauthToken {
         access,
-        subscription: None,
-        tier: None,
+        subscription: c.subscription_type,
+        tier: c.rate_limit_tier,
         source: "cli",
     })
 }
 
-/// Read `~/.claude.json` and turn it into the token the usage endpoint needs.
+/// Read the CLI's OAuth token from `~/.claude/.credentials.json`.
 fn load_cli_token() -> Result<OauthToken, String> {
+    let now_ms = Utc::now().timestamp_millis();
     let mut tried: Vec<String> = Vec::new();
-    for path in cli_config_candidates() {
+    for path in cli_credentials_candidates() {
         let raw = match read_with_retry(&path) {
             Ok(r) => r,
             Err(e) => {
@@ -411,7 +449,7 @@ fn load_cli_token() -> Result<OauthToken, String> {
                 continue;
             }
         };
-        match parse_cli_token(&raw, Utc::now().timestamp_millis()) {
+        match parse_cli_credentials(&raw, now_ms) {
             Ok(t) => {
                 dbg_log(&format!("claude cli: token from {}", path.display()));
                 return Ok(t);
@@ -419,7 +457,38 @@ fn load_cli_token() -> Result<OauthToken, String> {
             Err(e) => tried.push(format!("{}: {e}", path.display())),
         }
     }
-    Err(format!("Claude CLI config not usable ({})", tried.join(" | ")))
+    Err(format!(
+        "Claude CLI credentials not usable ({})",
+        tried.join(" | ")
+    ))
+}
+
+/// The CLI caches its last usage report in `~/.claude.json`. It has the same
+/// `five_hour` / `seven_day` shape as the API's own response, so it plugs
+/// straight into `build_snapshot` — a ready answer when the API is not
+/// reachable or there is no token to ask with.
+fn load_cached_usage() -> Result<Snapshot, String> {
+    for path in cli_state_candidates() {
+        let raw = match read_with_retry(&path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let cfg: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+        let Some(cached) = cfg.get("cachedUsageUtilization") else {
+            continue;
+        };
+        let Some(util) = cached.get("utilization") else {
+            return Err(format!(
+                "{}: cachedUsageUtilization has no utilization",
+                path.display()
+            ));
+        };
+        let usage: UsageResponse = serde_json::from_value(util.clone())
+            .map_err(|e| format!("parse cached utilization: {e}"))?;
+        return Ok(build_snapshot(usage));
+    }
+    Err("no cachedUsageUtilization in ~/.claude.json".into())
 }
 
 // ---------------------------------------------------------------------------
@@ -525,20 +594,17 @@ fn endpoint_ip() -> String {
 /// module's job — it reports `rate_limited` plus the server's `Retry-After`,
 /// and the poller's `RetryPolicy` decides the cooldown.
 pub fn fetch() -> Result<Snapshot, FetchError> {
-    let mut tokens = match load_tokens() {
-        Ok(t) => t,
-        // No Claude Desktop token cache: a machine with only the Claude CLI
-        // still has a token in ~/.claude.json — fall back to it.
-        Err(desktop_err) => match load_cli_token() {
-            Ok(t) => {
-                dbg_log(&format!(
-                    "claude: no Desktop token ({desktop_err}), using CLI token"
-                ));
-                vec![t]
-            }
-            Err(cli_err) => return Err(format!("{desktop_err}; {cli_err}").into()),
-        },
-    };
+    // Desktop tokens first; a machine with only the Claude CLI contributes its
+    // `~/.claude/.credentials.json` token instead.
+    let token_result: Result<Vec<OauthToken>, String> = load_tokens().or_else(|desktop_err| {
+        load_cli_token().map(|t| {
+            dbg_log(&format!(
+                "claude: no Desktop token ({desktop_err}), using CLI token"
+            ));
+            vec![t]
+        })
+    });
+    let mut tokens = token_result.unwrap_or_default();
 
     // Try the previously-working token first.
     if let Some(good) = LAST_GOOD.lock().unwrap().clone() {
@@ -610,7 +676,15 @@ pub fn fetch() -> Result<Snapshot, FetchError> {
             retry_after,
         ));
     }
-    Err(format!("usage request: {last_err}").into())
+    // The API did not answer (no token, offline, or a bad response): the CLI's
+    // cached usage report is the next best thing the strip can show.
+    match load_cached_usage() {
+        Ok(snap) => {
+            dbg_log("claude: API unanswered, using cached usage from ~/.claude.json");
+            Ok(snap)
+        }
+        Err(cache_err) => Err(format!("usage request: {last_err}; {cache_err}").into()),
+    }
 }
 
 fn build_snapshot(usage: UsageResponse) -> Snapshot {
@@ -727,59 +801,88 @@ mod tests {
         );
     }
 
-    /// The CLI token parser: the rules a ~/.claude.json token must pass before
-    /// the usage endpoint is asked. Verifies the expiry normalization (a
-    /// bare-seconds value is not misread as already-expired) and the profile
-    /// scope gate.
+    /// The CLI credentials parser: the rules a `~/.claude/.credentials.json`
+    /// token must pass before the usage endpoint is asked. The JSON below is
+    /// the shape Claude Code actually writes (`claudeAiOauth`, a `scopes`
+    /// array, ms `expiresAt`).
     #[test]
     fn cli_token_is_parsed_and_gated() {
         let now_ms = 1_800_000_000_000; // a fixed, real-world-shaped "now"
 
-        // A normal ms-expiry token with the profile scope parses.
-        let ok = super::parse_cli_token(
-            r#"{"oauthAccount":{"accessToken":"tok","expiresAt":1900000000000,"scope":"claude:all user:profile"}}"#,
+        let ok = super::parse_cli_credentials(
+            r#"{"claudeAiOauth":{"accessToken":"tok","expiresAt":1900000000000,
+                "scopes":["user:inference","user:profile"],"subscriptionType":"pro",
+                "rateLimitTier":"default_claude_ai"}}"#,
             now_ms,
         )
         .expect("valid");
         assert_eq!(ok.access, "tok");
         assert_eq!(ok.source, "cli");
+        assert_eq!(ok.subscription.as_deref(), Some("pro"));
+        assert_eq!(ok.tier.as_deref(), Some("default_claude_ai"));
 
-        // No scope field (older CLI): assume the default login scope.
-        assert!(super::parse_cli_token(
-            r#"{"oauthAccount":{"accessToken":"tok","expiresAt":1900000000000}}"#,
+        // No scopes list: assume the CLI's default login scope.
+        assert!(super::parse_cli_credentials(
+            r#"{"claudeAiOauth":{"accessToken":"tok","expiresAt":1900000000000}}"#,
             now_ms,
         )
         .is_ok());
 
         // Expired (ms) is rejected.
-        assert!(super::parse_cli_token(
-            r#"{"oauthAccount":{"accessToken":"tok","expiresAt":1000000}}"#,
+        assert!(super::parse_cli_credentials(
+            r#"{"claudeAiOauth":{"accessToken":"tok","expiresAt":1000000}}"#,
             now_ms,
         )
         .is_err());
 
         // A seconds-typed expiry in the future survives normalization.
         let secs = (now_ms / 1000) + 3600;
-        assert!(super::parse_cli_token(
-            &format!(r#"{{"oauthAccount":{{"accessToken":"tok","expiresAt":{secs}}}}}"#),
+        assert!(super::parse_cli_credentials(
+            &format!(r#"{{"claudeAiOauth":{{"accessToken":"tok","expiresAt":{secs}}}}}"#),
             now_ms,
         )
         .is_ok());
 
-        // A scope without user:profile cannot answer the usage endpoint.
-        assert!(super::parse_cli_token(
-            r#"{"oauthAccount":{"accessToken":"tok","expiresAt":1900000000000,"scope":"claude:all"}}"#,
+        // Scopes without user:profile cannot answer the usage endpoint.
+        assert!(super::parse_cli_credentials(
+            r#"{"claudeAiOauth":{"accessToken":"tok","expiresAt":1900000000000,"scopes":["user:inference"]}}"#,
             now_ms,
         )
         .is_err());
 
-        // Missing oauthAccount / empty token are not usable.
-        assert!(super::parse_cli_token(r#"{}"#, now_ms).is_err());
-        assert!(super::parse_cli_token(
-            r#"{"oauthAccount":{"accessToken":""}}"#,
+        // Missing claudeAiOauth / empty token are not usable.
+        assert!(super::parse_cli_credentials(r#"{}"#, now_ms).is_err());
+        assert!(super::parse_cli_credentials(
+            r#"{"claudeAiOauth":{"accessToken":""}}"#,
             now_ms,
         )
         .is_err());
+    }
+
+    /// The CLI's cached usage report has the same shape as the API response, so
+    /// it must deserialize into the very struct the live path uses — that is
+    /// what lets the offline fallback reuse `build_snapshot` unchanged.
+    #[test]
+    fn cached_usage_parses_like_the_api_response() {
+        let util = serde_json::json!({
+            "five_hour": {"utilization": 7, "resets_at": "2026-09-17T17:00:01.113862+03:00",
+                          "limit_dollars": null},
+            "seven_day": {"utilization": 7, "resets_at": "2026-09-19T23:00:00.113887+03:00"},
+            "seven_day_opus": null,
+            "extra_usage": {"is_enabled": false}
+        });
+        let usage: super::UsageResponse =
+            serde_json::from_value(util).expect("the cached shape deserializes");
+        let snap = super::build_snapshot(usage);
+        assert_eq!(snap.limits.len(), 2, "both rows come from the cache");
+        assert_eq!(snap.limits[0].title, "5-hour limit");
+        assert_eq!(snap.limits[0].used_percent, 7.0);
+        assert!(
+            snap.limits[0].window.is_some(),
+            "the 5-hour reset time was parsed"
+        );
+        assert_eq!(snap.limits[1].title, "Weekly · all models");
+        assert_eq!(snap.limits[1].used_percent, 7.0);
     }
 
     /// Not a test — the tool that answers "what does the service actually say".
